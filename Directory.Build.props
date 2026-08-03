@@ -12,7 +12,10 @@
          CS1591 is suppressed: XML docs are required on public contracts by review, not by the compiler. -->
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <NoWarn>$(NoWarn);CS1591</NoWarn>
-    <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- Must stay false: Microsoft.Data.SqlClient throws "Globalization Invariant Mode is not
+         supported" at connection time, so EF Core and the SQL Server health check both fail under it.
+         Culture-sensitive parsing is still avoided in code by using InvariantCulture explicitly. -->
+    <InvariantGlobalization>false</InvariantGlobalization>
     <AccelerateBuildsInVisualStudio>true</AccelerateBuildsInVisualStudio>
   </PropertyGroup>
 

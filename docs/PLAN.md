@@ -53,6 +53,18 @@ Files: `src/Chat.Application/Contracts/Messaging/*`
 ### [x] 0.7 Write the architecture and plan documents
 Files: `docs/ARCHITECTURE.md`, `docs/PLAN.md`
 
+### [x] 0.8 Add dependency health checks and a combined dev run
+Files: `src/Chat.Infrastructure/HealthChecks/*`, `src/Chat.Infrastructure/Messaging/RabbitMqOptions.cs`, `src/Chat.Infrastructure/Stocks/StooqOptions.cs`, `src/Chat.Web/Program.cs`, `src/Chat.Bot/*`, `Chat.slnLaunch`, `scripts/run-dev.ps1`
+- `SqlServerHealthCheck` (`SELECT 1`), `RabbitMqHealthCheck` (open a connection), `StooqHealthCheck` (probe the service root). Hand-written, no extra NuGet dependency.
+- `MapChatHealthChecks()` maps `/health`, `/health/ready` and `/health/live` identically in both hosts; shared JSON payload via `HealthReportSerializer`.
+- Stooq is tagged `external` and reports `Degraded`, so a Stooq outage never makes the bot unready.
+- `/health/live` runs no dependency probe — a broker outage must not trigger a process restart.
+- Chat.Bot became a `Microsoft.NET.Sdk.Web` host solely to serve health probes; it still has no persistence and no chat surface.
+- `Chat.slnLaunch` gives Visual Studio a "Chat.Web + Chat.Bot" startup profile; `scripts/run-dev.ps1` does the same from the CLI.
+- **Verified:** with the compose stack up, Chat.Web reports `sql-server` + `rabbitmq` healthy (200) and Chat.Bot reports `rabbitmq` + `stooq` healthy (200); stopping the broker turns `/health/ready` into 503 while `/health/live` stays 200.
+- Fixed two real defects found by running it: `InvariantGlobalization=true` broke `Microsoft.Data.SqlClient`, and `localhost` resolved to `::1` against IPv4-only published ports.
+- Follow-up for 1.10: switch `RabbitMqHealthCheck` to the shared singleton connection instead of opening one per probe.
+
 ---
 
 ## Phase 1 — Mandatory features
@@ -143,6 +155,7 @@ Acceptance:
 - Topology declared idempotently from `MessagingConstants`, including the DLX and both DLQs.
 - Publishers set `Persistent = true` and `ContentType = application/json`.
 - Consumer base: prefetch `MessagingConstants.PrefetchCount`, manual ack, `BasicNack(requeue:false)` on unprocessable payloads, honours `stoppingToken`.
+- `RabbitMqHealthCheck` switches from opening a per-probe connection to reporting `IsOpen` on the shared singleton connection.
 - `AddMessaging` binds `RabbitMqOptions` from configuration; no credentials in `appsettings.json`.
 Unit tests: `Serializer_RoundTrip_PreservesContract` for both contracts; `Topology_Declaration_UsesMessagingConstants` (assert the declared names come from the constants class).
 

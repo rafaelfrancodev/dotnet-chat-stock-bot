@@ -381,7 +381,47 @@ latest.Reverse();                                      // oldest -> newest for d
 
 ---
 
-## 9. Trade-offs and out of scope
+## 9. Health endpoints
+
+Both hosts expose the same three routes, mapped from one definition
+(`Chat.Infrastructure/HealthChecks/HealthCheckEndpoints.cs`) so they cannot drift apart.
+
+| Route | Contents | Semantics |
+| --- | --- | --- |
+| `/health` | every registered dependency | full JSON report; 200 healthy/degraded, 503 unhealthy |
+| `/health/ready` | checks tagged `ready` | can this process do useful work yet |
+| `/health/live` | no dependency probe at all | is this process running |
+
+| Host | Dependencies probed |
+| --- | --- |
+| `Chat.Web` | `sql-server` (`SELECT 1`), `rabbitmq` (open a connection) |
+| `Chat.Bot` | `rabbitmq`, `stooq` (probe the service root) |
+
+Design decisions:
+
+- **Liveness never probes a dependency.** If `/health/live` failed when RabbitMQ went down, an
+  orchestrator would restart a perfectly healthy process and lose the broker's automatic recovery.
+- **Stooq is tagged `external` and reports `Degraded`, not `Unhealthy`**, and is excluded from
+  `/health/ready`. A third-party outage is not the bot's fault: the bot stays ready and answers
+  "could not look that up right now", which is exactly the graceful-degradation bonus.
+- **The bot has no database probe**, because it has no database. That absence is the visible proof of
+  the decoupling the challenge asks for.
+- **Chat.Bot is a `Microsoft.NET.Sdk.Web` host purely to serve these probes.** It maps no chat routes
+  and still never references `Chat.Web`.
+- **The health probe does not fetch a real quote.** It probes the Stooq root, so monitoring cannot
+  consume the rate budget the actual feature depends on.
+- The JSON payload reports an exception's **message only, never its stack trace** — a stack trace would
+  leak server names and file paths to anyone who can reach the endpoint.
+- A missing connection string is *reported* as unhealthy with an actionable message rather than thrown
+  at startup, so a misconfigured host explains itself instead of crash-looping.
+
+Written by hand rather than pulled from `AspNetCore.HealthChecks.*`: the three probes are ~30 lines
+each, `SqlClient`/`RabbitMQ.Client`/`HttpClient` are already in the dependency graph, and it avoids
+another third-party licence and version to track.
+
+---
+
+## 10. Trade-offs and out of scope
 
 **Deliberate trade-offs**
 
@@ -395,6 +435,9 @@ latest.Reverse();                                      // oldest -> newest for d
 | Bot answers persisted | broadcast-only | "The post owner should be the bot" implies a post; survives a page refresh |
 | Razor Pages + Identity default UI + vanilla JS | SPA | The challenge explicitly says frontend as simple as possible |
 | Classic `.sln` | `.slnx` | Broadest tool compatibility for whoever opens the deliverable |
+| Hand-written health checks | `AspNetCore.HealthChecks.*` packages | ~30 lines each against clients already in the graph; no extra licence, version or advisory surface |
+| `FrameworkReference Microsoft.AspNetCore.App` in Infrastructure | duplicating the endpoint mapping in both hosts | One definition of the health routes and payload; the dependency rule is about direction, and nothing here is visible to Application or Domain |
+| `InvariantGlobalization=false` | the template default `true` | `Microsoft.Data.SqlClient` refuses to connect under invariant mode; parsing still pins `InvariantCulture` explicitly |
 
 **Out of scope (intentionally)**
 

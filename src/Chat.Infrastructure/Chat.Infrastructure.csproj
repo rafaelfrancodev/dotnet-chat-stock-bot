@@ -1,14 +1,22 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
+    <!-- Needed only by HealthChecks/HealthCheckEndpoints.cs, so both hosts can map identical health
+         routes from one definition. Dependencies still point inward: nothing here is visible to
+         Chat.Application or Chat.Domain. -->
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="Microsoft.EntityFrameworkCore" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.SqlServer" />
     <PackageReference Include="Microsoft.AspNetCore.Identity.EntityFrameworkCore" />
-    <PackageReference Include="Microsoft.Extensions.Http" />
+    <PackageReference Include="Microsoft.Data.SqlClient" />
     <PackageReference Include="Microsoft.Extensions.Http.Resilience" />
-    <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" />
-    <PackageReference Include="Microsoft.Extensions.Options.ConfigurationExtensions" />
     <PackageReference Include="RabbitMQ.Client" />
+    <!-- Diagnostics.HealthChecks, Extensions.Http, Hosting.Abstractions and
+         Options.ConfigurationExtensions are supplied by the Microsoft.AspNetCore.App framework
+         reference above; referencing them as packages as well trips NU1510. -->
   </ItemGroup>
 
   <ItemGroup>

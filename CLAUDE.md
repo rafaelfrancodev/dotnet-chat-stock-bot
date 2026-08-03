@@ -32,8 +32,8 @@ src/
   Chat.Domain/          # Entities, VOs (StockCode, MessageContent), domain events. No external deps.
   Chat.Application/     # Features/<UseCase>/ Command|Query + Handler + Validator; interfaces for infra.
   Chat.Infrastructure/  # EF Core + Identity, RabbitMQ publisher/consumer, Stooq typed HttpClient.
-  Chat.Web/             # SignalR hub(s), minimal UI, composition root.
-  Chat.Bot/             # BackgroundService: consume stock requests -> Stooq -> publish quote.
+  Chat.Web/             # SignalR hub(s), minimal UI, health endpoints, composition root.
+  Chat.Bot/             # BackgroundService: consume stock requests -> Stooq -> publish quote; health endpoints.
 tests/
   Chat.UnitTests/
   Chat.IntegrationTests/
@@ -65,24 +65,50 @@ Messaging topology: durable direct exchange `chat.stock` (+ DLX `chat.stock.dlx`
 
 ```bash
 cp .env.example .env                          # once — local-only credentials
+dotnet tool restore                           # once — pins dotnet-ef 10.0.10 (.config/dotnet-tools.json)
 docker compose -f docker-compose.dev.yml up -d   # SQL Server 2022 + RabbitMQ 4 (UI: http://localhost:15672)
 docker compose -f docker-compose.dev.yml ps      # wait for both to report (healthy)
 dotnet build                                  # 0 warnings expected (TreatWarningsAsErrors)
 dotnet test                                   # all tests
 dotnet format                                 # before committing
 dotnet format --verify-no-changes             # CI-style gate
+
+# EF commands only work from task 1.7 onward, once ChatDbContext exists.
 dotnet ef migrations add <Name> -p src/Chat.Infrastructure -s src/Chat.Web
 dotnet ef database update -p src/Chat.Infrastructure -s src/Chat.Web
-dotnet run --project src/Chat.Web             # terminal 1
-dotnet run --project src/Chat.Bot             # terminal 2
+dotnet run --project src/Chat.Web             # terminal 1 — http://localhost:5271
+dotnet run --project src/Chat.Bot             # terminal 2 — http://localhost:5299 (health only)
+```
+
+**Running both hosts together** (the stock flow needs both):
+
+```bash
+pwsh ./scripts/run-dev.ps1                    # builds, starts both, waits for /health/live, Ctrl+C stops both
+pwsh ./scripts/run-dev.ps1 -SkipBuild         # skip the build step
+```
+
+In Visual Studio 2026 pick the **"Chat.Web + Chat.Bot"** startup profile (defined in `Chat.slnLaunch`)
+instead of setting a single startup project.
+
+**Health endpoints** — both hosts expose the same three routes:
+
+```bash
+curl http://localhost:5271/health             # Chat.Web: sql-server + rabbitmq (JSON, 200/503)
+curl http://localhost:5299/health             # Chat.Bot: rabbitmq + stooq
+curl http://localhost:5271/health/ready       # readiness-tagged dependencies only
+curl http://localhost:5271/health/live        # process liveness, runs no dependency probe
 ```
 
 Copy `.env.example` to `.env` before `docker compose up`. The DB connection string and broker credentials come from user-secrets or `ConnectionStrings__ChatDatabase` / `RabbitMq__*` environment variables — never `appsettings.json`.
 
 ```bash
 dotnet user-secrets set "ConnectionStrings:ChatDatabase" \
-  "Server=localhost,1433;Database=ChatDb;User Id=sa;Password=<from .env>;Encrypt=True;TrustServerCertificate=True" \
+  "Server=127.0.0.1,1433;Database=ChatDb;User Id=sa;Password=<from .env>;Encrypt=True;TrustServerCertificate=True" \
   --project src/Chat.Web
+dotnet user-secrets set "RabbitMq:UserName" "<from .env>" --project src/Chat.Web
+dotnet user-secrets set "RabbitMq:Password" "<from .env>" --project src/Chat.Web
+dotnet user-secrets set "RabbitMq:UserName" "<from .env>" --project src/Chat.Bot
+dotnet user-secrets set "RabbitMq:Password" "<from .env>" --project src/Chat.Bot
 ```
 
 ## Workflow (Claude Code)
@@ -116,4 +142,7 @@ Agents: `architect`, `implementer`, `test-engineer`, `code-reviewer`, `docs-main
 - SQL Server needs ~30 s on first start. The compose healthcheck covers it, and `AddPersistence` uses `EnableRetryOnFailure` so `dotnet run` does not race the container.
 - Connection strings must carry `TrustServerCertificate=True` locally — the container uses a self-signed certificate and Microsoft.Data.SqlClient 4+ encrypts by default.
 - `dotnet test` prints "No test is available" for `Chat.IntegrationTests` until task 1.17 lands; exit code is still 0.
-- `Chat.Bot` must never call `AddPersistence()` — that is the structural guarantee it stays decoupled from the database.
+- `Chat.Bot` must never call `AddPersistence()` — that is the structural guarantee it stays decoupled from the database. It is a `Microsoft.NET.Sdk.Web` host purely so it can serve `/health`; it exposes no chat surface.
+- `InvariantGlobalization` must stay `false`. `Microsoft.Data.SqlClient` throws "Globalization Invariant Mode is not supported" at connection time, so EF Core and the SQL health check both fail under it. Use `CultureInfo.InvariantCulture` explicitly in parsing/formatting code instead.
+- Use `127.0.0.1`, never `localhost`, in connection strings and broker host names. The compose file publishes on IPv4 loopback only, but `localhost` resolves to `::1` first on Windows — SqlClient then burns its full 15 s timeout before failing.
+- Health checks are registered in `Chat.Infrastructure/HealthChecks` and mapped by `MapChatHealthChecks()`. Stooq is tagged `external` and deliberately excluded from `/health/ready` — a third-party outage must not mark the bot unready.

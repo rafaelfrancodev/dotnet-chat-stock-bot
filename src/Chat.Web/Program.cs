@@ -1,5 +1,6 @@
 using Chat.Application;
 using Chat.Infrastructure;
+using Chat.Infrastructure.HealthChecks;
 
 WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
 
@@ -7,6 +8,10 @@ WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
 builder.Services.AddApplication();
 builder.Services.AddPersistence(builder.Configuration);
 builder.Services.AddMessaging(builder.Configuration);
+
+builder.Services.AddHealthChecks()
+    .AddChatDatabase(builder.Configuration)
+    .AddChatBroker(builder.Configuration);
 
 builder.Services.AddRazorPages();
 
@@ -26,6 +31,7 @@ app.UseAuthorization();
 
 app.MapStaticAssets();
 app.MapRazorPages().WithStaticAssets();
+app.MapChatHealthChecks();
 
 app.Run();
 

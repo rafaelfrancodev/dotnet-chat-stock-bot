@@ -1,0 +1,17 @@
+[
+  {
+    "Name": "Chat.Web + Chat.Bot",
+    "Projects": [
+      {
+        "Path": "src\\Chat.Web\\Chat.Web.csproj",
+        "Action": "Start",
+        "DebugTarget": "https"
+      },
+      {
+        "Path": "src\\Chat.Bot\\Chat.Bot.csproj",
+        "Action": "Start",
+        "DebugTarget": "Chat.Bot"
+      }
+    ]
+  }
+]
