@@ -1,0 +1,270 @@
+# Delivery plan
+
+Ordered, independently committable tasks. **Every mandatory requirement is finished before any bonus.**
+
+Conventions for every task:
+- One commit, imperative message.
+- `dotnet build` + `dotnet test` green before the commit; `dotnet format` run.
+- A task is DONE only when its listed unit tests exist and pass.
+
+Legend: `[x]` done · `[ ]` pending.
+
+---
+
+## Phase 0 — Scaffold (done)
+
+### [x] 0.1 Create the solution and enforce the dependency rule
+Files: `Chat.sln`, `src/Chat.*/`, `tests/Chat.*/`
+- 7 projects on `net10.0`, classic `.sln` format.
+- References: Application→Domain, Infrastructure→Application, Web→Infrastructure, Bot→Infrastructure, UnitTests→Domain+Application+Infrastructure, IntegrationTests→Web+Bot.
+- `Chat.Domain.csproj` contains **zero** package/project references.
+
+### [x] 0.2 Add build and package governance
+Files: `Directory.Build.props`, `Directory.Packages.props`, `global.json`, `.editorconfig`
+- `net10.0`, `Nullable=enable`, `ImplicitUsings=enable`, `TreatWarningsAsErrors=true`, `LangVersion=latest`, `EnforceCodeStyleInBuild=true`.
+- Central package management; every version pinned in one file.
+- MediatR pinned to 12.5.0 and FluentAssertions to 7.2.2 (last permissively licensed releases).
+- **Verified:** `dotnet restore` and `dotnet build` succeed with 0 warnings.
+
+### [x] 0.3 Add local infrastructure and secret hygiene
+Files: `docker-compose.dev.yml`, `.env.example`, `.gitignore`, `src/Chat.Web/appsettings.json`, `src/Chat.Bot/appsettings.json`
+- SQL Server 2022 + RabbitMQ 4 (management UI) in one dev compose file, both with healthchecks, both published on `127.0.0.1` only, named volumes for data.
+- Credentials come from `.env` (git-ignored) and the compose file fails fast (`:?`) if they are missing.
+- `appsettings.json` ships placeholders only (empty connection string, empty broker user/password); real values via user-secrets or `ConnectionStrings__ChatDatabase` / `RabbitMq__*` environment variables.
+- `.gitignore` covers `.env`, `appsettings.*.Local.json`, `*.user`, `secrets.json`.
+- **Verified:** `docker compose -f docker-compose.dev.yml up -d` brings both containers to `healthy`; SQL Server accepts the `.env` credentials on `127.0.0.1:1433`.
+
+### [x] 0.4 Add the shared kernel
+Files: `src/Chat.Domain/Common/*`, `tests/Chat.UnitTests/Domain/Common/ResultTests.cs`
+- `Result`, `Result<T>`, `Error`, `Entity<TId>`, `AggregateRoot<TId>`, `IDomainEvent`.
+- Tests: `Success_WithValue_ExposesValue`, `Failure_WithError_CarriesErrorAndBlocksValueAccess`, `Failure_WithoutError_IsRejected`.
+
+### [x] 0.5 Add CQRS abstractions and the pipeline
+Files: `src/Chat.Application/Abstractions/Messaging/*`, `src/Chat.Application/Behaviors/*`, `src/Chat.Application/DependencyInjection.cs`
+- `ICommand`, `ICommand<T>`, `IQuery<T>` + handler markers over MediatR.
+- `LoggingBehavior`, `ValidationBehavior` (validation failures become failed `Result`s, never exceptions).
+- `AddApplication()` registers MediatR, both behaviors and all validators.
+
+### [x] 0.6 Define the messaging contracts and topology names
+Files: `src/Chat.Application/Contracts/Messaging/*`
+- `MessagingConstants` (exchange `chat.stock`, DLX `chat.stock.dlx`, queues `stock.quote.requests` / `stock.quote.responses` + DLQs, routing keys, prefetch, content type).
+- `StockQuoteRequested`, `StockQuoteResolved`, `StockQuoteOutcome`.
+
+### [x] 0.7 Write the architecture and plan documents
+Files: `docs/ARCHITECTURE.md`, `docs/PLAN.md`
+
+---
+
+## Phase 1 — Mandatory features
+
+### [ ] 1.1 Model the message value objects
+Files: `src/Chat.Domain/Messages/{MessageContent,MessageAuthor,MessageId,MessageOrigin}.cs`, `src/Chat.Domain/ChatRooms/ChatRoomId.cs`
+Acceptance:
+- `MessageContent.Create` trims, rejects empty/whitespace, rejects `> 500` chars, returns `Result<MessageContent>`.
+- `MessageAuthor.Create` rejects empty user id / display name; `MessageAuthor.Bot` is a well-known instance.
+- `ChatRoomId` / `MessageId` are `readonly record struct` over `Guid` with `New()`.
+Unit tests (`tests/Chat.UnitTests/Domain/Messages/`):
+- `Create_EmptyContent_ReturnsFailure`, `Create_WhitespaceOnly_ReturnsFailure`, `Create_TooLong_ReturnsFailure`, `Create_ValidContent_TrimsAndSucceeds`, `Equality_SameValue_AreEqual`.
+
+### [ ] 1.2 Model the StockCode value object
+Files: `src/Chat.Domain/StockCommands/StockCode.cs`
+Acceptance:
+- Normalises to lower case and trims; validates `^[a-z0-9.\-]{1,20}$`; `Display` returns upper case.
+- Rejects empty, `> 20` chars, spaces, and any character usable for URL/parameter injection (`&`, `?`, `/`, `=`, `%`, `#`).
+Unit tests (`tests/Chat.UnitTests/Domain/StockCommands/StockCodeTests.cs`):
+- `Create_MixedCase_NormalisesToLowerCase`, `Create_Empty_ReturnsFailure`, `Create_TooLong_ReturnsFailure`, `Create_ContainsUrlInjectionCharacters_ReturnsFailure` (`[Theory]`), `Display_ValidCode_ReturnsUpperCase`.
+
+### [ ] 1.3 Implement the chat command parser
+Files: `src/Chat.Domain/StockCommands/{ChatCommandParser,ParsedChatInput}.cs`
+Acceptance:
+- `/stock=aapl.us` → `StockQuote(StockCode)`; case-insensitive command name.
+- `/stock=` and `/stock` → `Invalid` / `UnknownCommand`; `/help` → `UnknownCommand("help")`.
+- Text not starting with `/` → `PlainMessage`; leading/trailing whitespace tolerated.
+- Never throws for any input.
+Unit tests (`tests/Chat.UnitTests/Domain/StockCommands/ChatCommandParserTests.cs`):
+- `Parse_StockCommand_ReturnsStockQuote`, `Parse_UpperCaseStockCommand_ReturnsStockQuote`, `Parse_StockCommandWithoutCode_ReturnsInvalid`, `Parse_UnknownSlashCommand_ReturnsUnknownCommand`, `Parse_PlainText_ReturnsPlainMessage`, `Parse_GarbageInput_DoesNotThrow` (`[Theory]`).
+
+### [ ] 1.4 Model the Message aggregate
+Files: `src/Chat.Domain/Messages/{Message.cs,MessagePosted.cs}`
+Acceptance:
+- `Message.PostByParticipant(...)` and `Message.PostByBot(...)` are the only ways to create a message; constructor is private.
+- Both raise `MessagePosted`; `Origin` is set correctly; `ChatRoomId` is stored by id (no navigation property).
+Unit tests: `PostByParticipant_ValidInput_RaisesMessagePosted`, `PostByBot_ValidInput_SetsBotAuthorAndOrigin`.
+
+### [ ] 1.5 Model the ChatRoom aggregate
+Files: `src/Chat.Domain/ChatRooms/{ChatRoom.cs,RoomName.cs,ChatRoomCreated.cs}`
+Acceptance:
+- `RoomName.Create` trims, collapses whitespace, rejects empty and `> 60` chars.
+- `ChatRoom.Create` raises `ChatRoomCreated`.
+Unit tests: `Create_EmptyName_ReturnsFailure`, `Create_ValidName_RaisesChatRoomCreated`.
+
+### [ ] 1.6 Declare the Application abstractions
+Files: `src/Chat.Application/Abstractions/{Persistence,Realtime,Stocks,Time}/*`
+Acceptance:
+- `IMessageRepository`, `IChatRoomRepository`, `IUnitOfWork`, `IChatNotifier`, `IStockQuoteRequester`, `IStockQuoteResponder`, `IStockQuoteProvider`, `IDateTimeProvider`.
+- Every method is async and takes a `CancellationToken`; read methods return DTOs, not entities.
+- XML doc comments on all of them.
+No tests (interfaces only) — the commit must still build clean.
+
+### [ ] 1.7 Add persistence (EF Core + Identity) and the initial migration
+Files: `src/Chat.Infrastructure/Persistence/{ChatDbContext.cs,Configurations/*,Migrations/*}`, `src/Chat.Infrastructure/Identity/ApplicationUser.cs`, `src/Chat.Infrastructure/DependencyInjection.cs`
+Acceptance:
+- `ChatDbContext : IdentityDbContext<ApplicationUser>` with value converters for the strongly-typed ids and value objects.
+- Composite index `IX_Messages_ChatRoomId_PostedAtUtc`; unique index on `ChatRooms.Name`.
+- `AddPersistence` registers SQL Server from `ConnectionStrings:ChatDatabase` (with `EnableRetryOnFailure` for container startup races), the repositories and `IUnitOfWork`. A missing connection string fails fast at startup with a clear message.
+- `dotnet ef migrations add InitialCreate` committed; `dotnet ef database update` creates `ChatDb` and succeeds from a clean checkout against the compose container.
+Unit tests: none (covered by 1.16 integration tests); the migration must be verified manually.
+
+### [ ] 1.8 Implement GetLatestMessages
+Files: `src/Chat.Application/Features/Messages/GetLatestMessages/*`, `src/Chat.Infrastructure/Persistence/Repositories/MessageRepository.cs`
+Acceptance:
+- Query defaults to `MessageConstants.LatestMessagesCount` (50).
+- Repository uses `AsNoTracking`, `OrderByDescending(PostedAtUtc)`, `Take(count)`, projects to `MessageDto` in SQL, then reverses in memory.
+Unit tests (`tests/Chat.UnitTests/Application/Features/Messages/`):
+- `Handle_RoomWithMessages_ReturnsOldestToNewest`, `Handle_MoreThan50Messages_ReturnsOnly50`, `Handle_UnknownRoom_ReturnsFailure`.
+
+### [ ] 1.9 Implement PostMessage with the stock-command branch
+Files: `src/Chat.Application/Features/Messages/PostMessage/*`, `src/Chat.Application/Features/StockCommands/RequestStockQuote/*`
+Acceptance:
+- `PostMessageHandler` parses first: plain message → persist + notify; stock command → dispatch `RequestStockQuoteCommand`, **no repository call**; unknown command → failed `Result`, nothing persisted or published.
+- `RequestStockQuoteHandler` has no repository/`IUnitOfWork` dependency and publishes through `IStockQuoteRequester`.
+- `PostMessageValidator` rejects an empty room id and empty raw input.
+Unit tests (highest-value tests in the repo):
+- `Handle_PlainMessage_PersistsAndNotifies`
+- `Handle_StockCommand_DoesNotPersistMessage` (asserts `repository.DidNotReceive().Add(...)`)
+- `Handle_StockCommand_PublishesStockQuoteRequest`
+- `Handle_UnknownCommand_ReturnsFailureAndPersistsNothing`
+- `Handle_UnknownRoom_ReturnsFailure`
+
+### [ ] 1.10 Add the RabbitMQ infrastructure
+Files: `src/Chat.Infrastructure/Messaging/{RabbitMqOptions,RabbitMqConnectionProvider,RabbitMqTopology,StockQuoteRequestPublisher,StockQuoteResponsePublisher,RabbitMqConsumerBase}.cs`
+Acceptance:
+- One singleton `IConnection` per process with automatic recovery and a bounded startup retry loop.
+- Topology declared idempotently from `MessagingConstants`, including the DLX and both DLQs.
+- Publishers set `Persistent = true` and `ContentType = application/json`.
+- Consumer base: prefetch `MessagingConstants.PrefetchCount`, manual ack, `BasicNack(requeue:false)` on unprocessable payloads, honours `stoppingToken`.
+- `AddMessaging` binds `RabbitMqOptions` from configuration; no credentials in `appsettings.json`.
+Unit tests: `Serializer_RoundTrip_PreservesContract` for both contracts; `Topology_Declaration_UsesMessagingConstants` (assert the declared names come from the constants class).
+
+### [ ] 1.11 Add Identity, authentication and the seeded default room to Chat.Web
+Files: `src/Chat.Web/Program.cs`, `src/Chat.Web/Areas/Identity/*`, `src/Chat.Infrastructure/Persistence/ChatDbSeeder.cs`
+Acceptance:
+- Register/login/logout work through the default Identity UI; cookie is HttpOnly + SameSite=Lax + Secure.
+- Default password policy and lockout untouched.
+- Migrations applied and a `General` room seeded at startup.
+- Anonymous users are redirected to login when opening the chat page.
+Unit tests: none; covered by 1.16.
+
+### [ ] 1.12 Implement ChatHub and the SignalR notifier
+Files: `src/Chat.Web/Hubs/ChatHub.cs`, `src/Chat.Web/Realtime/SignalRChatNotifier.cs`
+Acceptance:
+- `[Authorize]` on the hub. Author id and display name come from `Context.User`; the client payload carries only `roomId` and `text`.
+- `JoinRoom` adds the connection to `Groups`, `OnDisconnectedAsync` cleans up.
+- Broadcasts go to `Clients.Group(...)`, never `Clients.All`.
+- Hub methods are ~5 lines: claims → `ISender.Send` → map `Result` (errors go to `Clients.Caller` only).
+Unit tests: `SendMessage_UsesClaimsIdentity_NotClientPayload` (hub tested with a substituted `HubCallerContext`).
+
+### [ ] 1.13 Add the minimal chat page
+Files: `src/Chat.Web/Pages/Chat.cshtml(.cs)`, `src/Chat.Web/wwwroot/js/chat.js`
+Acceptance:
+- Loads the last 50 messages oldest→newest, then appends live ones.
+- Vanilla JS + the SignalR client; messages rendered with `textContent` (no `innerHTML`, no `Html.Raw`).
+- No SPA framework, no build step.
+Unit tests: none (UI). Manual check: two browsers, two users, both see each other's messages.
+
+### [ ] 1.14 Add the Stooq client and CSV parser
+Files: `src/Chat.Infrastructure/Stocks/{StooqOptions,StooqClient,StooqCsvParser}.cs`
+Acceptance:
+- Typed `HttpClient` via `IHttpClientFactory`, 10 s timeout, standard resilience handler (retry + circuit breaker).
+- URL built only from a validated `StockCode`.
+- Parser handles: valid row → price from the `Close` column; `N/D` fields → `SymbolNotFound`; missing/short/garbage CSV → `LookupFailed`; invariant-culture decimal parsing.
+Unit tests (`tests/Chat.UnitTests/Infrastructure/Stocks/StooqCsvParserTests.cs`):
+- `Parse_ValidRow_ReturnsClosePrice`
+- `Parse_NotAvailableRow_ReturnsSymbolNotFound`
+- `Parse_HeaderOnly_ReturnsLookupFailed`
+- `Parse_MalformedRow_ReturnsLookupFailed` (`[Theory]`)
+- `Parse_CommaDecimalCulture_StillParsesInvariant`
+
+### [ ] 1.15 Implement the bot use case and worker
+Files: `src/Chat.Application/Features/StockCommands/ResolveStockQuote/*`, `src/Chat.Bot/StockQuoteRequestConsumer.cs`, `src/Chat.Bot/Program.cs`
+Acceptance:
+- `ResolveStockQuoteHandler` calls `IStockQuoteProvider`, formats the message and publishes `StockQuoteResolved` through `IStockQuoteResponder`.
+- Exact wording on success: `"AAPL.US quote is $93.42 per share"` (price formatted with 2 decimals, invariant culture).
+- Unknown symbol and lookup failure produce friendly messages and `Outcome != Quoted`; the handler never throws.
+- The worker is a `BackgroundService`, fully async, honours `stoppingToken`.
+Unit tests:
+- `Handle_ValidQuote_PublishesExpectedMessageFormat`
+- `Handle_SymbolNotFound_PublishesFriendlyMessage`
+- `Handle_ProviderThrows_PublishesLookupFailedAndDoesNotRethrow`
+
+### [ ] 1.16 Consume quote responses in Chat.Web and post them as the bot
+Files: `src/Chat.Web/Messaging/StockQuoteResponseConsumer.cs`, `src/Chat.Application/Features/Messages/PostBotMessage/*`
+Acceptance:
+- Consumer deserialises `StockQuoteResolved` and sends `PostBotMessageCommand`.
+- `PostBotMessageHandler` creates a `Message` via `Message.PostByBot`, persists it and broadcasts to the room group.
+- Unparseable payloads are dead-lettered, not requeued.
+Unit tests: `Handle_BotMessage_PersistsWithBotAuthorAndBroadcasts`, `Handle_UnknownRoom_ReturnsFailureWithoutBroadcast`.
+
+### [ ] 1.17 Add the integration test suite
+Files: `tests/Chat.IntegrationTests/{CustomWebApplicationFactory.cs,...}`
+Acceptance:
+- Factory starts a throwaway SQL Server container via `Testcontainers.MsSql` (same provider as production), applies migrations once per collection, substitutes `IStockQuoteRequester`, and provides a test-auth helper.
+- Tests are skipped with a clear message when Docker is unavailable, so `dotnet test` never fails for environmental reasons.
+- Covers: anonymous hub connection rejected; register→login→chat page reachable; posting a message then reading it back in order and capped at 50; `/stock=aapl.us` publishes a broker request **and creates no message row**; two hub clients in the same room see each other's messages.
+- Deterministic waits (`TaskCompletionSource` + timeout), no `Task.Delay`.
+
+### [ ] 1.18 Verify the end-to-end flow manually and record it
+Files: `docs/ARCHITECTURE.md` (adjust if reality differs)
+Acceptance:
+- `docker compose up -d`, `dotnet run` both hosts, two browsers with two users: chat works, `/stock=aapl.us` produces the bot post, the command itself is absent from the database (verified with a SQL query against `Messages`).
+
+---
+
+## Phase 2 — Bonus features
+
+### [ ] 2.1 Confirm and document the .NET Identity bonus
+Files: `README.md`
+- Identity was delivered in 1.11 as the mechanism for the mandatory "registered users log in". Record it as a completed bonus, honestly.
+
+### [ ] 2.2 Multiple chat rooms
+Files: `src/Chat.Application/Features/Rooms/{CreateRoom,ListRooms}/*`, `src/Chat.Web/Pages/Chat.cshtml(.cs)`, `src/Chat.Web/Hubs/ChatHub.cs`
+Acceptance:
+- Create a room (unique name, validated), list rooms, switch rooms in the UI.
+- Switching leaves the old SignalR group and joins the new one; history reloads for the selected room.
+- A stock quote requested in room A is posted only to room A.
+Unit tests: `Handle_DuplicateName_ReturnsFailure`, `Handle_ValidName_CreatesRoom`, `Handle_NoRooms_ReturnsEmptyList`.
+
+### [ ] 2.3 Harden the bot against unknown commands and exceptions
+Files: `src/Chat.Bot/StockQuoteRequestConsumer.cs`, `src/Chat.Application/Features/StockCommands/ResolveStockQuote/*`
+Acceptance:
+- Malformed JSON → logged + dead-lettered, consumer stays alive.
+- Stooq timeout / 5xx / HTML error page → friendly `LookupFailed` message in the room.
+- Unknown chat commands answered privately to the caller (from 1.9) — verified end to end.
+- The bot process survives a broker restart (automatic recovery) — verified manually.
+Unit tests: `Consume_MalformedPayload_NacksWithoutRequeue`, `Consume_HandlerThrows_DoesNotStopConsumer`.
+
+### [ ] 2.4 Rate-limit posting per user
+Files: `src/Chat.Web/Hubs/ChatHub.cs` (or a hub filter)
+Acceptance: a user exceeding N messages per window gets a caller-only error; the limit is a named constant; no unbounded per-connection state.
+Unit tests: `SendMessage_AboveRateLimit_ReturnsFailure`.
+
+### [ ] 2.5 Installer
+Files: `installer/` (`install.ps1` + `install.sh`), `README.md`
+Acceptance:
+- One script: checks prerequisites, copies `.env.example`, starts RabbitMQ, applies migrations, builds, prints the two `dotnet run` commands.
+- Idempotent and safe to re-run; fails with a clear message when Docker or the SDK is missing.
+
+---
+
+## Phase 3 — Documentation and delivery
+
+### [ ] 3.1 Write the README (graded deliverable)
+Files: `README.md`
+- What it is, screenshot, prerequisites, exact run steps (verified on a clean clone), architecture summary with a link to `docs/ARCHITECTURE.md`, design decisions (bot messages persisted, SQL Server in Docker, contracts location, licence pins), bonus checklist with honest status, how to run the tests.
+
+### [ ] 3.2 Final review pass
+- Dependency rule re-checked; no secrets (`grep -riE "password|secret|apikey" src/`); all hubs `[Authorize]`; identity from claims; stock code validated before the outbound call; `dotnet format` clean; `dotnet build` 0 warnings; `dotnet test` green.
+
+### [ ] 3.3 Sync CLAUDE.md and prepare the deliverable
+- Update the Architecture / Commands / Status / Conventions / Gotchas sections to match reality.
+- Confirm the local Git history is meaningful (one commit per task) and that `.git/` is included in the delivery.

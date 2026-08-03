@@ -1,0 +1,6 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The Domain layer deliberately has NO package and NO project references.
+       If a dependency ever appears here, the dependency rule has been broken. -->
+
+</Project>

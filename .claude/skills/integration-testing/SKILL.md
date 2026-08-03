@@ -8,7 +8,7 @@ description: Integration testing approach — WebApplicationFactory, in-memory/S
 ## Stack
 
 - Microsoft.AspNetCore.Mvc.Testing (WebApplicationFactory<Program>), xUnit, FluentAssertions.
-- Database: SQLite in-memory (relational semantics) or Testcontainers if Docker is assumed; swap the real DB via a test factory override.
+- Database: `Testcontainers.MsSql` — a throwaway SQL Server container, the same provider the app runs on. Docker is already a prerequisite (see `docker-compose.dev.yml`). Swap the connection via a test factory override; skip the tests with a clear message when Docker is unavailable.
 - RabbitMQ: substitute IStockQuoteRequester/consumer with fakes in most tests; optionally one Testcontainers-based test for the real broker round-trip if time allows.
 
 ## What to cover (highest value for this challenge)

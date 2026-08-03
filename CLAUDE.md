@@ -41,7 +41,9 @@ tests/
 
 Dependency rule: Web/Bot → Infrastructure → Application → Domain. Never the other way.
 
-Stock flow: hub → `PostMessageCommand` → parser detects `/stock=` → `RequestStockQuoteCommand` → publish to `stock.quote.requests` queue → Bot consumes → Stooq CSV → publish to `stock.quote.responses` → Web consumer broadcasts to the room as "Bot". No DB write anywhere in this path.
+Stock flow: hub → `PostMessageCommand` → parser detects `/stock=` → `RequestStockQuoteCommand` → publish to `stock.quote.requests` queue → Bot consumes → Stooq CSV → publish to `stock.quote.responses` → Web consumer posts + broadcasts to the room as "Bot". The **command** is never written to the DB.
+
+Messaging topology: durable direct exchange `chat.stock` (+ DLX `chat.stock.dlx`), queues `stock.quote.requests` / `stock.quote.responses` with dead-letter queues; all names in `Chat.Application/Contracts/Messaging/MessagingConstants.cs`. The wire contracts (`StockQuoteRequested`, `StockQuoteResolved`) live in `Chat.Application/Contracts/Messaging` — no separate Contracts project. Persistence is EF Core + SQL Server 2022 (database `ChatDb`, run in Docker via `docker-compose.dev.yml`), sharing one `ChatDbContext` with Identity. Bot quote answers **are** persisted (`MessageOrigin.Bot`) and then broadcast; only the `/stock=` command is never persisted. Full design: `docs/ARCHITECTURE.md`.
 
 ## Conventions
 
@@ -52,19 +54,36 @@ Stock flow: hub → `PostMessageCommand` → parser detects `/stock=` → `Reque
 - Tests: xUnit + FluentAssertions; naming `Scenario_Condition_ExpectedOutcome`.
 - Constants: `LatestMessagesCount = 50`; queue names in `MessagingConstants`.
 - Commit per completed task, imperative messages.
+- Central package management: all versions in `Directory.Packages.props`, never in a csproj.
+- Licence-pinned: MediatR stays on 12.x (Apache-2.0), FluentAssertions on 7.x. Do not upgrade.
+- LF line endings everywhere (`.editorconfig` + `.gitattributes`); `dotnet format` enforces it.
+- Primary constructors are preferred; captured parameters stay camelCase, explicit fields use `_`.
+- Requests implement `ICommand`/`ICommand<T>`/`IQuery<T>` so the `Result`-constrained pipeline behaviors apply.
+- Read paths return DTOs projected in SQL; entities never leave a repository on the query side.
 
 ## Commands
 
 ```bash
-docker compose up -d                          # RabbitMQ (+ DB if containerized)
+cp .env.example .env                          # once — local-only credentials
+docker compose -f docker-compose.dev.yml up -d   # SQL Server 2022 + RabbitMQ 4 (UI: http://localhost:15672)
+docker compose -f docker-compose.dev.yml ps      # wait for both to report (healthy)
+dotnet build                                  # 0 warnings expected (TreatWarningsAsErrors)
+dotnet test                                   # all tests
+dotnet format                                 # before committing
+dotnet format --verify-no-changes             # CI-style gate
+dotnet ef migrations add <Name> -p src/Chat.Infrastructure -s src/Chat.Web
 dotnet ef database update -p src/Chat.Infrastructure -s src/Chat.Web
 dotnet run --project src/Chat.Web             # terminal 1
 dotnet run --project src/Chat.Bot             # terminal 2
-dotnet test                                   # all tests
-dotnet format                                 # before committing
 ```
 
-(Verify/update these once the solution is scaffolded — see /update-claude-md.)
+Copy `.env.example` to `.env` before `docker compose up`. The DB connection string and broker credentials come from user-secrets or `ConnectionStrings__ChatDatabase` / `RabbitMq__*` environment variables — never `appsettings.json`.
+
+```bash
+dotnet user-secrets set "ConnectionStrings:ChatDatabase" \
+  "Server=localhost,1433;Database=ChatDb;User Id=sa;Password=<from .env>;Encrypt=True;TrustServerCertificate=True" \
+  --project src/Chat.Web
+```
 
 ## Workflow (Claude Code)
 
@@ -79,8 +98,8 @@ Agents: `architect`, `implementer`, `test-engineer`, `code-reviewer`, `docs-main
 
 ## Status
 
-- [ ] Architecture designed, PLAN.md created
-- [ ] Solution scaffolded
+- [x] Architecture designed, PLAN.md created (`docs/ARCHITECTURE.md`, `docs/PLAN.md`)
+- [x] Solution scaffolded (7 projects, build + tests + format green)
 - [ ] Mandatory features implemented
 - [ ] Bonus features (see checklist above)
 - [ ] README finalized and verified
@@ -92,3 +111,9 @@ Agents: `architect`, `implementer`, `test-engineer`, `code-reviewer`, `docs-main
 - Stooq ticker format is lowercase with market suffix (`aapl.us`); normalize and validate (`^[a-z0-9.\-]{1,20}$`) before building the URL.
 - RabbitMQ may not be ready when apps start locally — use resilient connection/retry on startup.
 - Reviewers will open 2 browsers with 2 users: broadcast via SignalR groups per room, identity from claims (never from client payload).
+- `TreatWarningsAsErrors` + `EnforceCodeStyleInBuild` are on: unused usings and style violations fail the build. `GenerateDocumentationFile=true` is required for IDE0005 to fire; `CS1591` is suppressed.
+- `MSSQL_SA_PASSWORD` is baked into the SQL Server volume on first start; changing it in `.env` later needs `docker compose -f docker-compose.dev.yml down -v`. It must satisfy SQL Server's complexity policy (8+ chars, upper/lower/digit/symbol) or the container exits at boot.
+- SQL Server needs ~30 s on first start. The compose healthcheck covers it, and `AddPersistence` uses `EnableRetryOnFailure` so `dotnet run` does not race the container.
+- Connection strings must carry `TrustServerCertificate=True` locally — the container uses a self-signed certificate and Microsoft.Data.SqlClient 4+ encrypts by default.
+- `dotnet test` prints "No test is available" for `Chat.IntegrationTests` until task 1.17 lands; exit code is still 0.
+- `Chat.Bot` must never call `AddPersistence()` — that is the structural guarantee it stays decoupled from the database.

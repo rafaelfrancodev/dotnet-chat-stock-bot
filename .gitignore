@@ -55,3 +55,14 @@ CodeCoverage/
 *.VisualState.xml
 TestResult.xml
 nunit-*.xml
+
+# Local secrets and environment overrides (challenge: keep confidential information secure)
+appsettings.*.Local.json
+appsettings.Local.json
+*.user
+secrets.json
+
+# IDE
+.vs/
+.idea/
+*.swp
