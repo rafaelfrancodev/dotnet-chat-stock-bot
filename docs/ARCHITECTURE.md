@@ -356,25 +356,50 @@ connection pool, one migration history, one transaction scope.
 ### The "last 50 ordered by timestamp" query
 
 ```csharp
-List<MessageDto> latest = await _context.Messages
+// MessageRepository.LatestMessagesQuery
+context.Messages
     .AsNoTracking()
-    .Where(m => m.ChatRoomId == roomId)
-    .OrderByDescending(m => m.PostedAtUtc)
-    .ThenByDescending(m => m.Id)                       // deterministic tie-break
+    .Where(message => message.ChatRoomId == chatRoomId)
+    .OrderByDescending(message => message.PostedAtUtc)
+    .ThenByDescending(message => message.Id)           // deterministic tie-break
     .Take(count)                                       // MessageConstants.LatestMessagesCount = 50
-    .Select(m => new MessageDto(m.Id.Value, m.Author.DisplayName, m.Content.Value, m.PostedAtUtc, m.Origin))
-    .ToListAsync(cancellationToken);
-
-latest.Reverse();                                      // oldest -> newest for display
+    .Select(message => new LatestMessageRow(
+        message.Id, message.Author.DisplayName, message.Content, message.PostedAtUtc, message.Origin));
 ```
+
+which SQL Server receives as exactly:
+
+```sql
+SELECT TOP(@p) [m].[Id], [m].[AuthorDisplayName], [m].[Content], [m].[PostedAtUtc], [m].[Origin]
+FROM [Messages] AS [m]
+WHERE [m].[ChatRoomId] = @chatRoomId
+ORDER BY [m].[PostedAtUtc] DESC, [m].[Id] DESC
+```
+
+The rows are then reversed and unwrapped into `MessageDto` in a single pass over at most 50 items.
 
 - Composite index `IX_Messages_ChatRoomId_PostedAtUtc` on `(ChatRoomId, PostedAtUtc DESC)` — the query is
   a single index range scan, cost independent of history size.
 - `AsNoTracking()` + projection: no change tracker entries, no entity materialisation.
 - `Take(50)` runs in the database. The full history is **never** loaded or broadcast.
 - The reverse happens in memory on 50 rows — cheaper and clearer than a subquery.
-- `PostedAtUtc` is stored as `datetime2(7)` and always written in UTC; the `DateTimeKind` is restored on
-  read by a value converter so no local-time drift can enter the ordering.
+- The projection stops at the value objects rather than at `MessageDto` itself: EF Core cannot translate
+  member access on a value-converted type (`message.Content.Value`), so `MessageContent` and `MessageId`
+  are materialised and unwrapped by the same loop that reverses the list. The SQL is identical either
+  way — only five columns, never `AuthorUserId`, which `MessageDto` deliberately does not carry.
+- `PostedAtUtc` is stored as `datetime2(7)` and always written in UTC: `UtcDateTimeOffsetConverter` drops
+  the (always zero) offset on write and restores `DateTimeKind.Utc` on read, so a local time cannot enter
+  the ordering key even through a hand-written `INSERT`.
+- `Messages` has **no foreign keys at all**. `AuthorUserId` is a plain `nvarchar(450)` because the bot
+  owns its posts and `system:bot` is not — and must not become — an Identity user; `ChatRoomId` is a
+  cross-aggregate reference whose validity is checked by `IChatRoomRepository.ExistsAsync`, so an unknown
+  room is an expected `Result` failure instead of a `DbUpdateException`.
+
+`MessageAuthor` maps as an EF **complex type** (columns `AuthorUserId`, `AuthorDisplayName` in
+`Messages`); `MessageContent`, `RoomName` and both strongly-typed ids map through value converters. All
+aggregates are materialised through their private parameterless constructors and their backing fields —
+no configuration switches to `PropertyAccessMode.Property`, so the domain factories stay the only public
+way to build a message or a room.
 
 ---
 

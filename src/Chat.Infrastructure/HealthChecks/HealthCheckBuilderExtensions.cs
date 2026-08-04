@@ -1,4 +1,5 @@
 using Chat.Infrastructure.Messaging;
+using Chat.Infrastructure.Persistence;
 using Chat.Infrastructure.Stocks;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -13,8 +14,6 @@ namespace Chat.Infrastructure.HealthChecks;
 /// </summary>
 public static class HealthCheckBuilderExtensions
 {
-    private const string DatabaseConnectionName = "ChatDatabase";
-
     /// <summary>Probes the chat database with <c>SELECT 1</c>. Gates readiness.</summary>
     public static IHealthChecksBuilder AddChatDatabase(
         this IHealthChecksBuilder builder,
@@ -23,16 +22,17 @@ public static class HealthCheckBuilderExtensions
         ArgumentNullException.ThrowIfNull(builder);
         ArgumentNullException.ThrowIfNull(configuration);
 
-        string? connectionString = configuration.GetConnectionString(DatabaseConnectionName);
+        string? connectionString = configuration.GetConnectionString(PersistenceConstants.ConnectionStringName);
 
         if (string.IsNullOrWhiteSpace(connectionString))
         {
-            // Reported rather than thrown: a misconfigured host should say so on /health instead of
-            // failing to start with a stack trace.
+            // Reported rather than thrown: a host can register this check without AddPersistence (which
+            // does fail fast), and a probe endpoint that explains the gap beats one that cannot answer.
             return builder.AddCheck(
                 HealthCheckNames.SqlServer,
                 new NotConfiguredHealthCheck(
-                    $"ConnectionStrings:{DatabaseConnectionName} is not set. See README -> Configuration."),
+                    $"ConnectionStrings:{PersistenceConstants.ConnectionStringName} is not set. " +
+                    "See README -> Configuration."),
                 HealthStatus.Unhealthy,
                 [HealthCheckNames.ReadyTag]);
         }

@@ -197,8 +197,8 @@ but the conventions above are worth enforcing rather than documenting:
 - `Application_ReferencesNoInfrastructureFramework` — asserts the compiled assembly references no EF Core,
   MassTransit, ASP.NET Core or RabbitMQ.Client, so the dependency rule is checked by the build.
 
-### [ ] 1.7 Add persistence (EF Core + Identity) and the initial migration
-Files: `src/Chat.Infrastructure/Persistence/{ChatDbContext.cs,Configurations/*,Migrations/*}`, `src/Chat.Infrastructure/Identity/ApplicationUser.cs`, `src/Chat.Infrastructure/DependencyInjection.cs`
+### [x] 1.7 Add persistence (EF Core + Identity) and the initial migration
+Files: `src/Chat.Infrastructure/Persistence/{ChatDbContext.cs,PersistenceConstants.cs,Converters/*,Configurations/*,Repositories/*,Migrations/*}`, `src/Chat.Infrastructure/Identity/ApplicationUser.cs`, `src/Chat.Infrastructure/Time/SystemDateTimeProvider.cs`, `src/Chat.Infrastructure/DependencyInjection.cs`, `src/Chat.Web/Program.cs`, `.editorconfig`
 Acceptance:
 - `ChatDbContext : IdentityDbContext<ApplicationUser>` with value converters for the strongly-typed ids and value objects.
 - `Message` is materialised through its private parameterless constructor (added in 1.4) and its
@@ -213,13 +213,64 @@ Acceptance:
   sensitivity follows the column collation; `RoomName` itself is case-preserving and case-sensitive).
 - `AddPersistence` registers SQL Server from `ConnectionStrings:ChatDatabase` (with `EnableRetryOnFailure` for container startup races), the repositories and `IUnitOfWork`. A missing connection string fails fast at startup with a clear message.
 - `dotnet ef migrations add InitialCreate` committed; `dotnet ef database update` creates `ChatDb` and succeeds from a clean checkout against the compose container.
-Unit tests: none (covered by 1.16 integration tests); the migration must be verified manually.
+Decisions taken here (later tasks must conform):
+- **`Messages` has no foreign keys at all.** `AuthorUserId` is a plain `nvarchar(450)` — the bot's
+  `system:bot` is not an Identity user, so an FK to `AspNetUsers` would reject every quote answer the
+  challenge requires. `ChatRoomId` is a cross-aggregate reference validated by `ExistsAsync`, so an
+  unknown room is an expected `Result` failure rather than a `DbUpdateException`.
+- Column widths: `AuthorUserId` `nvarchar(450)` (Identity's own `AspNetUsers.Id` width, the widest key
+  SQL Server indexes), `AuthorDisplayName` and `ApplicationUser.DisplayName` `nvarchar(256)` (Identity's
+  `UserName` width, and display names come from there), `Content` `nvarchar(500)`
+  (`MessageConstants.MaxContentLength`), `Name` `nvarchar(60)` (`RoomName.MaxLength`). Nothing is
+  `nvarchar(max)`. All in `PersistenceConstants`.
+- `MessageAuthor` maps as an EF **complex type** (not `OwnsOne`): no entity identity, no tracking
+  overhead, and `message.Author.DisplayName` stays translatable in the read projection.
+- Timestamps are `datetime2(7)` via `UtcDateTimeOffsetConverter`, which drops the always-zero offset on
+  write and restores `DateTimeKind.Utc` on read — a local time cannot enter the ordering key.
+- **The read projection stops at the value objects, not at `MessageDto`.** EF Core cannot translate
+  member access on a value-converted type (`message.Content.Value`), so the query selects five columns
+  into an internal `LatestMessageRow` and one loop both reverses the list and unwraps it. Verified SQL:
+  `SELECT TOP(@p) [Id], [AuthorDisplayName], [Content], [PostedAtUtc], [Origin] FROM [Messages] WHERE
+  [ChatRoomId] = @chatRoomId ORDER BY [PostedAtUtc] DESC, [Id] DESC`.
+- `IDateTimeProvider` is implemented here as `SystemDateTimeProvider` and registered by
+  `AddSystemClock()` — a separate extension, because the clock is not persistence and `Chat.Bot` must
+  never call `AddPersistence()`. `Chat.Web` calls it today; 1.15 should call it if the bot needs a clock.
+- `AddPersistence` **throws** on a missing connection string (a host that cannot reach its database
+  cannot serve one request), while `AddChatDatabase` still *reports* the same gap on `/health` — a host
+  may register the probe without the persistence layer. Both now read `PersistenceConstants.ConnectionStringName`.
+- `.editorconfig` marks `src/Chat.Infrastructure/Persistence/Migrations/*.cs` as `generated_code = true`:
+  `dotnet ef` emits block-scoped namespaces and an unused `using System;`, which `TreatWarningsAsErrors`
+  turned into IDE0161/IDE0005 build errors. Scoped to the generated folder; nothing else is relaxed.
+- **Verified against the running container:** migration `20260804190713_InitialCreate` applied to `ChatDb`;
+  `sys.foreign_keys` on `dbo.Messages` returns 0; `IX_Messages_ChatRoomId_PostedAtUtc` exists with
+  `PostedAtUtc` descending; `IX_ChatRooms_Name` is unique; columns are `uniqueidentifier` / `nvarchar(500)` /
+  `int` / `datetime2` / `nvarchar(256)` / `nvarchar(450)`. A throwaway round trip wrote a room, three
+  participant posts and one **bot** post, read them back oldest→newest with all offsets zero, and was then
+  deleted — proving materialisation through the private constructors and that no FK rejects `system:bot`.
+Unit tests (`tests/Chat.UnitTests/Infrastructure/Persistence/`, 27 cases) — the plan said "none", but the
+model and the generated SQL can be asserted with no database at all, which is worth more than prose:
+- `ChatDbContextModelTests` (17): `Model_ForChatAndIdentity_BuildsWithoutThrowing`,
+  `Messages_HaveNoForeignKey_SoTheBotCanOwnItsPosts`, `Messages_AreIndexedByRoomThenNewestPostFirst`,
+  `ChatRooms_HaveAUniqueIndexOnName`, `StronglyTypedIds_AreStoredAsGuids` (`[Theory]`),
+  `ValueObjects_AreStoredAsBoundedStrings` (`[Theory]`),
+  `MessageAuthor_IsStoredInTheMessagesTable_AsTwoBoundedColumns`, `MessageOrigin_IsStoredAsAnInteger`,
+  `Timestamps_AreStoredAsUtcInstantsWithoutAnOffset` (`[Theory]`),
+  `ReadingATimestamp_RestoresUtcKindAndZeroOffset`, `Aggregates_DoNotPersistTheirDomainEvents`
+  (`[Theory]`), `IdentityUsers_CarryABoundedDisplayName`.
+- `MessageRepositoryQueryTests` (2): `LatestMessagesQuery_FiltersOrdersAndLimits_InTheDatabase`,
+  `LatestMessagesQuery_SelectsOnlyTheColumnsTheChatWindowRenders` — compiled with `ToQueryString()`,
+  which translates the query offline and would fail if the mapping ever stopped supporting it.
+- `AddPersistenceTests` (8): `AddPersistence_WithoutAConnectionString_FailsFastWithAnActionableMessage`
+  (`[Theory]`), `AddPersistence_WithAConnectionString_ResolvesThePersistencePorts` (`[Theory]`),
+  `AddSystemClock_RegistersAClockThatReadsUtc`.
 
 ### [ ] 1.8 Implement GetLatestMessages
-Files: `src/Chat.Application/Features/Messages/GetLatestMessages/*`, `src/Chat.Infrastructure/Persistence/Repositories/MessageRepository.cs`
+Files: `src/Chat.Application/Features/Messages/GetLatestMessages/*`
 Acceptance:
 - Query defaults to `MessageConstants.LatestMessagesCount` (50).
-- Repository uses `AsNoTracking`, `OrderByDescending(PostedAtUtc)`, `Take(count)`, projects to `MessageDto` in SQL, then reverses in memory.
+- **`MessageRepository` already ships from 1.7** — `AsNoTracking`, ordering, `Take(count)` and the
+  projection all run in SQL and the result is already oldest→newest. This task is the handler only: it
+  checks the room exists and calls `GetLatestAsync`. Do not re-sort and do not re-implement the query.
 - `MessageDto` already exists from 1.6 in `Chat.Application/Contracts/Messages/` — reuse it, do not
   declare a second one in the feature folder.
 Unit tests (`tests/Chat.UnitTests/Application/Features/Messages/`):
@@ -252,6 +303,9 @@ Unit tests: `Serializer_RoundTrip_PreservesContract` for both contracts; publish
 Files: `src/Chat.Web/Program.cs`, `src/Chat.Web/Areas/Identity/*`, `src/Chat.Infrastructure/Persistence/ChatDbSeeder.cs`
 Acceptance:
 - Register/login/logout work through the default Identity UI; cookie is HttpOnly + SameSite=Lax + Secure.
+- `ApplicationUser` (1.7) already exists with `DisplayName` (`nvarchar(256)`, required): wire
+  `AddDefaultIdentity<ApplicationUser>().AddEntityFrameworkStores<ChatDbContext>()` and capture the
+  display name at registration — an empty one would make every post render blank.
 - Default password policy and lockout untouched.
 - Migrations applied and a `General` room seeded at startup.
 - Anonymous users are redirected to login when opening the chat page.
@@ -310,7 +364,7 @@ Unit tests: `Handle_BotMessage_PersistsWithBotAuthorAndBroadcasts`, `Handle_Unkn
 ### [ ] 1.17 Add the integration test suite
 Files: `tests/Chat.IntegrationTests/{CustomWebApplicationFactory.cs,...}`
 Acceptance:
-- Factory starts a throwaway SQL Server container via `Testcontainers.MsSql` (same provider as production), applies migrations once per collection, substitutes `IStockQuoteRequester`, and provides a test-auth helper.
+- Factory starts a throwaway SQL Server container via `Testcontainers.MsSql` (same provider as production), applies migrations once per collection, substitutes `IStockQuoteRequester`, and provides a test-auth helper. Overriding `ConnectionStrings:ChatDatabase` with the container's string is enough — `AddPersistence` reads only that key, and throws if it is missing.
 - Tests are skipped with a clear message when Docker is unavailable, so `dotnet test` never fails for environmental reasons.
 - Covers: anonymous hub connection rejected; register→login→chat page reachable; posting a message then reading it back in order and capped at 50; `/stock=aapl.us` publishes a broker request **and creates no message row**; two hub clients in the same room see each other's messages.
 - Deterministic waits (`TaskCompletionSource` + timeout), no `Task.Delay`.

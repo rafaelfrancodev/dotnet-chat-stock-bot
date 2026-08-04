@@ -141,3 +141,10 @@ dotnet_diagnostic.CA2201.severity = warning
 [tests/**/*.cs]
 # Test classes legitimately expose public fields for xUnit fixtures and theory data.
 dotnet_diagnostic.IDE0044.severity = suggestion
+
+[src/Chat.Infrastructure/Persistence/Migrations/*.cs]
+# `dotnet ef migrations add` emits block-scoped namespaces and a `using System;` it does not always
+# need, which TreatWarningsAsErrors would turn into a build failure. These files are generated, never
+# hand-edited, and reformatting them would only make the next migration fail the same way — so they
+# are declared as what they are instead of relaxing anything for hand-written code.
+generated_code = true

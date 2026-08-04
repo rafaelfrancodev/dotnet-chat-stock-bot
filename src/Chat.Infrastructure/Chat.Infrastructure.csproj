@@ -26,4 +26,10 @@
     <ProjectReference Include="..\Chat.Application\Chat.Application.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Lets the unit tests assert the SQL of the "last 50" query without making the query builder
+         part of the public surface. -->
+    <InternalsVisibleTo Include="Chat.UnitTests" />
+  </ItemGroup>
+
 </Project>

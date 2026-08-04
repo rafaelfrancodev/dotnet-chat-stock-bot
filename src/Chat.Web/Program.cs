@@ -6,6 +6,7 @@ WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
 
 // Composition root: the only place in Chat.Web that knows about every layer.
 builder.Services.AddApplication();
+builder.Services.AddSystemClock();
 builder.Services.AddPersistence(builder.Configuration);
 builder.Services.AddMessaging(builder.Configuration);
 

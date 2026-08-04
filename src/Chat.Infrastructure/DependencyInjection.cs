@@ -1,8 +1,15 @@
+using Chat.Application.Abstractions.Persistence;
+using Chat.Application.Abstractions.Time;
 using Chat.Application.Contracts.Messaging;
 using Chat.Infrastructure.Messaging;
+using Chat.Infrastructure.Persistence;
+using Chat.Infrastructure.Persistence.Repositories;
+using Chat.Infrastructure.Time;
 using MassTransit;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Options;
 
 namespace Chat.Infrastructure;
@@ -13,8 +20,62 @@ namespace Chat.Infrastructure;
 /// </summary>
 public static class DependencyInjection
 {
-    /// <summary>EF Core, Identity stores and repository implementations. Used by Chat.Web only.</summary>
-    public static IServiceCollection AddPersistence(this IServiceCollection services, IConfiguration configuration) => services;
+    /// <summary>
+    /// EF Core, Identity stores and repository implementations. Used by Chat.Web only —
+    /// Chat.Bot never calls this, which is what structurally keeps the bot away from the database.
+    /// </summary>
+    /// <param name="services">Service collection to register into.</param>
+    /// <param name="configuration">
+    /// Configuration carrying <c>ConnectionStrings:ChatDatabase</c>, supplied by user-secrets or the
+    /// <c>ConnectionStrings__ChatDatabase</c> environment variable — never by a committed file.
+    /// </param>
+    /// <exception cref="InvalidOperationException">The connection string is missing or blank.</exception>
+    public static IServiceCollection AddPersistence(this IServiceCollection services, IConfiguration configuration)
+    {
+        ArgumentNullException.ThrowIfNull(services);
+        ArgumentNullException.ThrowIfNull(configuration);
+
+        string? connectionString = configuration.GetConnectionString(PersistenceConstants.ConnectionStringName);
+
+        if (string.IsNullOrWhiteSpace(connectionString))
+        {
+            // Fails fast, unlike the health check's equivalent gap: a host that cannot reach its
+            // database cannot serve a single request, so starting up and failing later would only
+            // hide the misconfiguration behind a stack trace on the first message.
+            throw new InvalidOperationException(
+                $"ConnectionStrings:{PersistenceConstants.ConnectionStringName} is not configured. Set it with " +
+                $"\"dotnet user-secrets set \"ConnectionStrings:{PersistenceConstants.ConnectionStringName}\" " +
+                "\"<connection string>\" --project src/Chat.Web\" or the " +
+                $"ConnectionStrings__{PersistenceConstants.ConnectionStringName} environment variable. " +
+                "See README -> Configuration.");
+        }
+
+        services.AddDbContext<ChatDbContext>(options =>
+            options.UseSqlServer(connectionString, sqlServer => sqlServer.EnableRetryOnFailure(
+                PersistenceConstants.MaxRetryCount,
+                TimeSpan.FromSeconds(PersistenceConstants.MaxRetryDelaySeconds),
+                errorNumbersToAdd: null)));
+
+        services.AddScoped<IChatRoomRepository, ChatRoomRepository>();
+        services.AddScoped<IMessageRepository, MessageRepository>();
+        services.AddScoped<IUnitOfWork, UnitOfWork>();
+
+        return services;
+    }
+
+    /// <summary>
+    /// The system clock behind <see cref="IDateTimeProvider"/>. Registered by every host that creates
+    /// domain objects, because the aggregates take their timestamp as a parameter instead of reading it.
+    /// </summary>
+    /// <param name="services">Service collection to register into.</param>
+    public static IServiceCollection AddSystemClock(this IServiceCollection services)
+    {
+        ArgumentNullException.ThrowIfNull(services);
+
+        services.TryAddSingleton<IDateTimeProvider, SystemDateTimeProvider>();
+
+        return services;
+    }
 
     /// <summary>
     /// The MassTransit bus over RabbitMQ. Used by both hosts.
