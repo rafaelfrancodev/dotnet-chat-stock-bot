@@ -97,13 +97,20 @@ Acceptance:
 Unit tests (`tests/Chat.UnitTests/Domain/StockCommands/StockCodeTests.cs`):
 - `Create_MixedCase_NormalisesToLowerCase`, `Create_Empty_ReturnsFailure`, `Create_TooLong_ReturnsFailure`, `Create_ContainsUrlInjectionCharacters_ReturnsFailure` (`[Theory]`), `Display_ValidCode_ReturnsUpperCase`.
 
-### [ ] 1.3 Implement the chat command parser
+### [x] 1.3 Implement the chat command parser
 Files: `src/Chat.Domain/StockCommands/{ChatCommandParser,ParsedChatInput}.cs`
 Acceptance:
 - `/stock=aapl.us` → `StockQuote(StockCode)`; case-insensitive command name.
 - `/stock=` and `/stock` → `Invalid` / `UnknownCommand`; `/help` → `UnknownCommand("help")`.
 - Text not starting with `/` → `PlainMessage`; leading/trailing whitespace tolerated.
 - Never throws for any input.
+- `ParsedChatInput` is a closed hierarchy (abstract record + private constructor + four nested sealed
+  records), so task 1.9 branches with a type `switch` — no string matching, no casts.
+- Ticker rules are not restated: a bad argument returns `Invalid` carrying `StockCode`'s own `Error`.
+  Only "a slash with no command name" (`/`, `/=`) uses a parser-owned error.
+- `StringComparison.OrdinalIgnoreCase` for the command name and `ToLowerInvariant` for the reported
+  one — culture-sensitive comparison would change which commands match under tr-TR.
+- `PlainMessage.Text` is trimmed (same normalisation `MessageContent.Create` applies).
 Unit tests (`tests/Chat.UnitTests/Domain/StockCommands/ChatCommandParserTests.cs`):
 - `Parse_StockCommand_ReturnsStockQuote`, `Parse_UpperCaseStockCommand_ReturnsStockQuote`, `Parse_StockCommandWithoutCode_ReturnsInvalid`, `Parse_UnknownSlashCommand_ReturnsUnknownCommand`, `Parse_PlainText_ReturnsPlainMessage`, `Parse_GarbageInput_DoesNotThrow` (`[Theory]`).
 
