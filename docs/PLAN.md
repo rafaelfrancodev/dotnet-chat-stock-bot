@@ -264,17 +264,45 @@ model and the generated SQL can be asserted with no database at all, which is wo
   (`[Theory]`), `AddPersistence_WithAConnectionString_ResolvesThePersistencePorts` (`[Theory]`),
   `AddSystemClock_RegistersAClockThatReadsUtc`.
 
-### [ ] 1.8 Implement GetLatestMessages
-Files: `src/Chat.Application/Features/Messages/GetLatestMessages/*`
+### [x] 1.8 Implement GetLatestMessages
+Files: `src/Chat.Application/Features/Messages/GetLatestMessages/{GetLatestMessagesQuery,GetLatestMessagesHandler,GetLatestMessagesValidator}.cs`, `src/Chat.Application/Chat.Application.csproj`
 Acceptance:
-- Query defaults to `MessageConstants.LatestMessagesCount` (50).
+- `GetLatestMessagesQuery(ChatRoomId, int Count = MessageConstants.LatestMessagesCount)` implements
+  `IQuery<IReadOnlyList<MessageDto>>`; the 50 is never restated as a literal.
 - **`MessageRepository` already ships from 1.7** — `AsNoTracking`, ordering, `Take(count)` and the
   projection all run in SQL and the result is already oldest→newest. This task is the handler only: it
   checks the room exists and calls `GetLatestAsync`. Do not re-sort and do not re-implement the query.
 - `MessageDto` already exists from 1.6 in `Chat.Application/Contracts/Messages/` — reuse it, do not
   declare a second one in the feature folder.
-Unit tests (`tests/Chat.UnitTests/Application/Features/Messages/`):
-- `Handle_RoomWithMessages_ReturnsOldestToNewest`, `Handle_MoreThan50Messages_ReturnsOnly50`, `Handle_UnknownRoom_ReturnsFailure`.
+Decisions taken here (later tasks must conform):
+- **`Count` is bounded at `MessageConstants.LatestMessagesCount`, not merely defaulted to it.** It
+  reaches SQL as `TOP(n)`, so a caller-supplied count is a lever on how much the database reads and how
+  much every chat window downloads — the resource consumption the challenge warns about. Capping it at
+  the same constant also makes "show only the last 50" enforced: no client can ask for the 51st message.
+  Lower bound `GetLatestMessagesValidator.MinimumCount = 1` (0 or less is a caller bug, not an empty room).
+- **The room check runs first and short-circuits**, so an unknown room costs one `AnyAsync` and never a
+  history read. The failure is `GetLatestMessagesQuery.Errors.ChatRoomNotFound` (`ChatRoom.NotFound`).
+- **`Errors` is nested on the query, not on the handler**, because the handler is `internal`: the request
+  and the failures it can produce are the public surface of a feature. 1.9 and 1.16 need the same
+  "unknown room" failure — when the second copy appears, promote it to one shared `ChatRoomErrors`.
+- **Handlers and validators are `internal sealed`**; `Chat.Application.csproj` gained
+  `InternalsVisibleTo Chat.UnitTests` (same reason and shape as `Chat.Infrastructure`). MediatR and
+  FluentValidation both find them by assembly scan (`includeInternalTypes: true` was already set), and
+  two registration tests pin that, since a mistake would surface as a runtime resolution failure in the
+  hub rather than a build error.
+Unit tests (`tests/Chat.UnitTests/Application/Features/Messages/`, 23 cases):
+- `GetLatestMessagesHandlerTests` (9): `Handle_RoomWithMessages_ReturnsOldestToNewest`,
+  `Handle_RoomWithMessages_ReturnsTheRepositorySequenceUntouched` (same instance — proves nothing is
+  re-sorted or re-paged), `Handle_MoreThan50Messages_ReturnsOnly50`, `Handle_UnknownRoom_ReturnsFailure`,
+  `Handle_UnknownRoom_DoesNotQueryMessages`, `Handle_NoCountSupplied_RequestsTheDefaultCountFromTheRepository`,
+  `Handle_ExplicitCount_IsPassedThroughToTheRepository`, `Handle_Always_ForwardsTheCancellationTokenToBothQueries`,
+  `Handle_EmptyRoom_SucceedsWithAnEmptyList`.
+- `GetLatestMessagesValidatorTests` (11): `Validate_DefaultQuery_IsValid`, `Validate_DefaultRoomId_IsRejected`,
+  `Validate_NonPositiveCount_IsRejected` (`[Theory]`), `Validate_CountAboveTheCap_IsRejected` (`[Theory]`),
+  `Validate_CountOnTheBoundary_IsAccepted` (`[Theory]`), `Validate_DefaultCount_EqualsTheChallengeLimit`.
+- `GetLatestMessagesRegistrationTests` (3): `AddApplication_RegistersTheInternalQueryHandler`,
+  `AddApplication_RegistersTheInternalValidator`,
+  `Send_InvalidCount_IsRejectedByThePipelineAsAFailedResult` (validation failure → failed `Result`, not an exception).
 
 ### [ ] 1.9 Implement PostMessage with the stock-command branch
 Files: `src/Chat.Application/Features/Messages/PostMessage/*`, `src/Chat.Application/Features/StockCommands/RequestStockQuote/*`

@@ -12,4 +12,10 @@
     <ProjectReference Include="..\Chat.Domain\Chat.Domain.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Handlers and validators stay internal — the request types are the public surface of a feature —
+         so the unit tests need this to construct them. -->
+    <InternalsVisibleTo Include="Chat.UnitTests" />
+  </ItemGroup>
+
 </Project>
