@@ -77,7 +77,7 @@ Files: `Directory.Packages.props`, `src/Chat.Infrastructure/{DependencyInjection
 
 ## Phase 1 — Mandatory features
 
-### [ ] 1.1 Model the message value objects
+### [x] 1.1 Model the message value objects
 Files: `src/Chat.Domain/Messages/{MessageContent,MessageAuthor,MessageId,MessageOrigin}.cs`, `src/Chat.Domain/ChatRooms/ChatRoomId.cs`
 Acceptance:
 - `MessageContent.Create` trims, rejects empty/whitespace, rejects `> 500` chars, returns `Result<MessageContent>`.
