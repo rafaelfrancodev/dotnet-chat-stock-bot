@@ -165,13 +165,37 @@ Unit tests (`tests/Chat.UnitTests/Domain/ChatRooms/{RoomNameTests,ChatRoomTests}
 - `Create_InternalWhitespace_CollapsesToSingleSpaces` (`[Theory]`), `Create_NonBreakingSpace_IsCollapsedLikeAnyOtherWhitespace`, `Create_SurroundingWhitespace_TrimsAndSucceeds`, `Equality_DifferentlySpacedInput_AreEqual`, `Equality_DifferentValue_AreNotEqual`, `Equality_DifferentCasing_AreNotEqual`, `ToString_ValidName_ReturnsNormalisedText`.
 - `Create_ValidName_RaisesChatRoomCreated`, `Create_ValidName_RaisesExactlyOneEventCarryingIdAndName`, `Create_NullName_Throws`, `Create_DefaultCreationTime_ReturnsFailure`, `Create_NonUtcCreationTime_NormalisesToUtcWithoutChangingTheInstant`, `Create_TwoRooms_GetDistinctIdentities`, `ClearDomainEvents_AfterCreate_RemovesTheRecordedEvent`, `Constructors_AreAllNonPublic_SoTheFactoryIsTheOnlyEntryPoint`, `ChatRoom_HoldsNoMessages_SoTheAggregateBoundaryIsPreserved`.
 
-### [ ] 1.6 Declare the Application abstractions
-Files: `src/Chat.Application/Abstractions/{Persistence,Realtime,Stocks,Time}/*`
+### [x] 1.6 Declare the Application abstractions
+Files: `src/Chat.Application/Abstractions/{Persistence,Realtime,Stocks,Time}/*`, `src/Chat.Application/Contracts/Messages/MessageDto.cs`
 Acceptance:
 - `IMessageRepository`, `IChatRoomRepository`, `IUnitOfWork`, `IChatNotifier`, `IStockQuoteRequester`, `IStockQuoteResponder`, `IStockQuoteProvider`, `IDateTimeProvider`.
 - Every method is async and takes a `CancellationToken`; read methods return DTOs, not entities.
 - XML doc comments on all of them.
-No tests (interfaces only) — the commit must still build clean.
+Decisions taken here (later tasks must conform):
+- **`MessageDto` lives in `Contracts/Messages/`, not in the 1.8 feature folder.** Three ports share it
+  (`IMessageRepository.GetLatestAsync`, `IChatNotifier.BroadcastMessageAsync`, and 1.8's query result);
+  putting it under one feature would make the other two depend on that feature. It carries no `UserId` —
+  the chat window needs a display name, not everyone's authentication id.
+- **Two documented exceptions to "every method is async"**: `IMessageRepository.Add` /
+  `IChatRoomRepository.Add` stage an in-memory change and do no I/O (and 1.9's
+  `repository.DidNotReceive().Add(...)` test depends on that shape), and `IDateTimeProvider.UtcNow` is a
+  property. Everything else returns `Task`/`Task<T>` with a trailing `CancellationToken`.
+- **Repositories never commit.** `Add` stages; `IUnitOfWork.SaveChangesAsync` commits exactly once per
+  use case. This is what makes "this path performs no write" provable in a handler test.
+- `IChatNotifier` takes a `ChatRoomId` on every member, so broadcasting to all connections is not
+  expressible — the room group is structural, not a convention.
+- `IStockQuoteProvider` returns `StockQuoteLookup(StockQuoteOutcome, decimal?)`, reusing the existing
+  outcome enum rather than a second vocabulary, and must never throw for an unknown symbol or timeout.
+- `IMessageRepository.GetLatestAsync` defaults `count` to `MessageConstants.LatestMessagesCount` and is
+  documented to return oldest→newest, so callers never re-sort.
+Unit tests (`tests/Chat.UnitTests/Application/AbstractionsTests.cs`, 26 cases) — the plan said "no tests",
+but the conventions above are worth enforcing rather than documenting:
+- `Port_AsynchronousMethods_ReturnATaskType`, `Port_AsynchronousMethods_TakeACancellationTokenLast`,
+  `Port_NoMember_LeaksADomainEntityOrAnIQueryable` (all `[Theory]` over the eight ports).
+- `Ports_ExposeTheAsynchronousSurfaceTheRulesAreMeantToCover` — guards the three rules above against
+  passing vacuously if reflection ever stops finding the members.
+- `Application_ReferencesNoInfrastructureFramework` — asserts the compiled assembly references no EF Core,
+  MassTransit, ASP.NET Core or RabbitMQ.Client, so the dependency rule is checked by the build.
 
 ### [ ] 1.7 Add persistence (EF Core + Identity) and the initial migration
 Files: `src/Chat.Infrastructure/Persistence/{ChatDbContext.cs,Configurations/*,Migrations/*}`, `src/Chat.Infrastructure/Identity/ApplicationUser.cs`, `src/Chat.Infrastructure/DependencyInjection.cs`
@@ -196,6 +220,8 @@ Files: `src/Chat.Application/Features/Messages/GetLatestMessages/*`, `src/Chat.I
 Acceptance:
 - Query defaults to `MessageConstants.LatestMessagesCount` (50).
 - Repository uses `AsNoTracking`, `OrderByDescending(PostedAtUtc)`, `Take(count)`, projects to `MessageDto` in SQL, then reverses in memory.
+- `MessageDto` already exists from 1.6 in `Chat.Application/Contracts/Messages/` — reuse it, do not
+  declare a second one in the feature folder.
 Unit tests (`tests/Chat.UnitTests/Application/Features/Messages/`):
 - `Handle_RoomWithMessages_ReturnsOldestToNewest`, `Handle_MoreThan50Messages_ReturnsOnly50`, `Handle_UnknownRoom_ReturnsFailure`.
 
