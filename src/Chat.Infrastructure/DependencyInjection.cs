@@ -1,4 +1,5 @@
 using Chat.Application.Abstractions.Persistence;
+using Chat.Application.Abstractions.Stocks;
 using Chat.Application.Abstractions.Time;
 using Chat.Application.Contracts.Messaging;
 using Chat.Infrastructure.Messaging;
@@ -83,12 +84,19 @@ public static class DependencyInjection
     /// <param name="services">Service collection to register into.</param>
     /// <param name="configuration">Configuration carrying the <c>RabbitMq</c> section.</param>
     /// <param name="registerConsumers">
-    /// Host-specific consumer registration. Chat.Bot registers the request consumer, Chat.Web the
-    /// response consumer; neither host learns about the other's endpoint.
+    /// Host-specific consumer registration, expressed with
+    /// <see cref="Messaging.StockQuoteEndpointExtensions"/>. Chat.Bot registers the request consumer,
+    /// Chat.Web the response consumer; neither host learns about the other's endpoint.
     /// </param>
     /// <remarks>
-    /// Registering the bus also registers MassTransit's <c>masstransit-bus</c> health check, which is
-    /// how both hosts report broker connectivity — see <c>HealthChecks/HealthCheckNames.cs</c>.
+    /// Also registers the two outbound ports over <see cref="IPublishEndpoint"/>, so every host that has
+    /// a bus can publish without knowing the transport. Both are scoped, matching MassTransit's own
+    /// lifetime for <see cref="IPublishEndpoint"/>: inside a consumer the scoped endpoint carries the
+    /// current <c>ConsumeContext</c>, which is what propagates correlation across the round trip.
+    /// <para>
+    /// Registering the bus also registers MassTransit's <c>masstransit-bus</c> health check — see
+    /// <c>HealthChecks/HealthCheckNames.cs</c> for what it does and does not report.
+    /// </para>
     /// </remarks>
     public static IServiceCollection AddMessaging(
         this IServiceCollection services,
@@ -128,9 +136,14 @@ public static class DependencyInjection
                     MessagingConstants.RetryLimit,
                     TimeSpan.FromSeconds(MessagingConstants.RetryIntervalSeconds)));
 
+                // Applies the settings above to every registered consumer's endpoint, using the
+                // endpoint names StockQuoteEndpointExtensions pinned to MessagingConstants.
                 bus.ConfigureEndpoints(context);
             });
         });
+
+        services.TryAddScoped<IStockQuoteRequester, MassTransitStockQuoteRequester>();
+        services.TryAddScoped<IStockQuoteResponder, MassTransitStockQuoteResponder>();
 
         return services;
     }

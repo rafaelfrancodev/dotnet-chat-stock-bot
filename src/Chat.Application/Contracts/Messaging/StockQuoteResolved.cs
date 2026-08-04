@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace Chat.Application.Contracts.Messaging;
 
 /// <summary>
@@ -20,7 +22,14 @@ public sealed record StockQuoteResolved(
     string Message,
     DateTimeOffset ResolvedAtUtc);
 
-/// <summary>Why the bot answered the way it did. Serialised as a string for forward compatibility.</summary>
+/// <summary>Why the bot answered the way it did.</summary>
+/// <remarks>
+/// Serialised as its name rather than its ordinal. Measured: MassTransit's default
+/// <c>System.Text.Json</c> options write an enum as a number, which would let a member inserted into
+/// this list re-interpret messages already queued while the two hosts are deployed apart. The converter
+/// is declared on the type so it holds wherever the contract is serialised, not only on the bus.
+/// </remarks>
+[JsonConverter(typeof(JsonStringEnumConverter<StockQuoteOutcome>))]
 public enum StockQuoteOutcome
 {
     /// <summary>Stooq returned a usable closing price.</summary>

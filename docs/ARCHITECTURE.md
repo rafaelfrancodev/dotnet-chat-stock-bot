@@ -216,6 +216,12 @@ to the whole room.
 
 Types: `StockQuoteRequested`, `StockQuoteResolved`, `StockQuoteOutcome`, `MessagingConstants`.
 
+`StockQuoteOutcome` carries `[JsonConverter(typeof(JsonStringEnumConverter<StockQuoteOutcome>))]`, so it
+travels as `"SymbolNotFound"` rather than `1`. Task 1.10 measured MassTransit's default
+`System.Text.Json` options writing the ordinal, which would let a member inserted into the enum
+re-interpret messages already queued while the two hosts are deployed apart. The attribute lives on the
+type, so the guarantee holds wherever the contract is serialised, not only on the bus.
+
 ---
 
 ## 4. Messaging topology
@@ -267,7 +273,7 @@ transport rather than configure it.
 | Endpoint names | `stock-quote-requests`, `stock-quote-responses` (`MessagingConstants`) | Explicit and readable in the management UI rather than convention-derived |
 | Endpoint formatter | `SetKebabCaseEndpointNameFormatter()` | Any convention-named endpoint matches the ones we name by hand |
 | Prefetch | `10` (`MessagingConstants.PrefetchCount`) | Bounded in-flight work; work is I/O-bound against a third party |
-| Retry | `Interval(3, 2s)` | Rides out a brief Stooq blip; then the message moves to `_error` instead of looping |
+| Retry | `Interval(3, 2s)` | Rides out a brief Stooq blip; then the message moves to `_error` instead of looping. Measured in 1.10 against the real broker: 4 attempts ~2 s apart, then the message sat in `stock-quote-requests_error` and the input queue returned to empty |
 | Durability | MassTransit defaults: durable queues, persistent messages | Survives a broker restart mid-demo |
 | Consumer registration | Passed per host into `AddMessaging(...)` | Chat.Web registers only the response consumer, Chat.Bot only the request consumer — neither learns the other's endpoint |
 
@@ -481,13 +487,20 @@ Both hosts expose the same three routes, mapped from one definition
 ### Why there are two broker checks
 
 `masstransit-bus` is registered automatically by `AddMassTransit`. It reports **bus lifecycle state, not
-broker reachability**. Measured with the broker stopped for 60 s: it stayed `Healthy` throughout and the
-bus logged no connection attempt, because a bus with no receive endpoints registered never opens one.
-Our `rabbitmq` check went `Unhealthy` immediately and correctly drove `/health/ready` to 503.
+broker reachability**. Task 0.9 measured it with no receive endpoints (it stayed `Healthy` through a 60 s
+outage, because a bus that consumes nothing never connects); task 1.10 re-measured it against Chat.Bot
+running a **real receive endpoint on `stock-quote-requests`**:
 
-Both are therefore kept for now. Task 1.10 registers the real receive endpoints and must re-measure: if
-a stopped broker then turns `masstransit-bus` unhealthy, `RabbitMqHealthCheck` should be deleted, since
-the bus check costs nothing while ours opens a short-lived connection per probe.
+| Scenario | `masstransit-bus` | Our `rabbitmq` check | `/health/ready` with the bus check alone |
+| --- | --- | --- | --- |
+| Everything up | `Healthy` — "Ready" | `Healthy` | 200 |
+| Broker already down at startup | `Unhealthy` — "Not ready: not started" | `Unhealthy` | 503 |
+| Broker stopped after a healthy start (4 samples over 60 s) | `Degraded` — "Degraded Endpoints: stock-quote-requests" | `Unhealthy` | **200** |
+
+The third row is the outage that actually happens in production, and `Degraded` maps to HTTP 200 — the
+host would keep advertising itself as ready while no quote can flow. **`RabbitMqHealthCheck` is therefore
+kept, and the removal trigger from task 0.9 is closed.** One short-lived connection per probe is the
+price of a readiness signal that is true.
 
 Design decisions:
 
@@ -532,7 +545,7 @@ Verified behaviour (both hosts): all dependencies up → 200; broker stopped →
 | Classic `.sln` | `.slnx` | Broadest tool compatibility for whoever opens the deliverable |
 | MassTransit 8 over RabbitMQ | raw `RabbitMQ.Client` | Connection lifetime, topology, retry, `_error` queues and consumer plumbing are the code most likely to be subtly wrong; MassTransit also gives `ITestHarness` so messaging is unit-testable without a broker |
 | MassTransit pinned to 8.5.10 | 9.x | 9.0 moved to a commercial licence (Massient, Inc.); 8.5.10 is the last Apache-2.0 release and has a native `net10.0` target |
-| Keeping our `rabbitmq` probe alongside `masstransit-bus` | bus check alone | Measured: the bus check stays healthy through a broker outage until receive endpoints exist. Removal trigger recorded in task 1.10 |
+| Keeping our `rabbitmq` probe alongside `masstransit-bus` | bus check alone | Measured twice (§9): with a live receive endpoint the bus check only *degrades* when the broker drops mid-run, and a degraded check still answers HTTP 200 |
 | Hand-written health checks | `AspNetCore.HealthChecks.*` packages | ~30 lines each against clients already in the graph; no extra licence, version or advisory surface |
 | `FrameworkReference Microsoft.AspNetCore.App` in Infrastructure | duplicating the endpoint mapping in both hosts | One definition of the health routes and payload; the dependency rule is about direction, and nothing here is visible to Application or Domain |
 | `InvariantGlobalization=false` | the template default `true` | `Microsoft.Data.SqlClient` refuses to connect under invariant mode; parsing still pins `InvariantCulture` explicitly |
@@ -583,7 +596,8 @@ src/Chat.Application/
 src/Chat.Infrastructure/
   Persistence/                 ChatDbContext, configurations, repositories, migrations
   Identity/                    ApplicationUser, Identity configuration
-  Messaging/                   RabbitMqConnection, publishers, consumer base, RabbitMqOptions
+  Messaging/                   RabbitMqOptions, MassTransitStockQuoteRequester/Responder,
+                               StockQuoteEndpointExtensions (endpoint names from MessagingConstants)
   Stocks/                      StooqClient, StooqCsvParser, StooqOptions
   DependencyInjection.cs       AddPersistence(), AddMessaging(), AddStockQuotes()
 

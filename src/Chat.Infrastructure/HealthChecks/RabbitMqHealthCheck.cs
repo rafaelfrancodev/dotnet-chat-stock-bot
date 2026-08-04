@@ -9,15 +9,17 @@ namespace Chat.Infrastructure.HealthChecks;
 /// Verifies the broker is reachable and the configured credentials and virtual host are accepted.
 /// </summary>
 /// <remarks>
-/// This probe exists *alongside* MassTransit's own <c>masstransit-bus</c> check because that check
-/// reports bus lifecycle state, not connectivity. Measured with the broker stopped: the bus check
-/// stayed <c>Healthy</c> indefinitely and logged no connection attempt, because a bus with no receive
-/// endpoints registered never opens one. Until consumers exist it is not a dependency probe at all.
-/// <para>
-/// Task 1.10 should re-measure once the receive endpoints are registered: if a stopped broker then
-/// turns <c>masstransit-bus</c> unhealthy, delete this class and its registration, because the bus
-/// check costs nothing while this one opens a short-lived connection per probe.
-/// </para>
+/// This probe exists *alongside* MassTransit's own <c>masstransit-bus</c> check, and task 1.10 settled
+/// why by measuring both with a real receive endpoint running:
+/// <list type="bullet">
+/// <item>broker already down at startup — the bus reports <c>Unhealthy</c> ("Not ready: not started");</item>
+/// <item>broker stopped after a healthy start — the bus reports <c>Degraded</c> ("Degraded Endpoints:
+/// stock-quote-requests") for 60 s+, and <c>Degraded</c> maps to HTTP 200, so <c>/health/ready</c> keeps
+/// answering "ready" while no quote can flow.</item>
+/// </list>
+/// The second case is the one that matters for an outage in production, so this check is kept: it goes
+/// <c>Unhealthy</c> immediately and correctly drives <c>/health/ready</c> to 503. The cost is one
+/// short-lived connection per probe, which is what buys an accurate readiness signal.
 /// </remarks>
 internal sealed class RabbitMqHealthCheck(IOptions<RabbitMqOptions> options) : IHealthCheck
 {

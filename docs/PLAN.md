@@ -382,15 +382,76 @@ Unit tests (`tests/Chat.UnitTests/Application/Features/`, 62 cases — the highe
   `Send_PlainMessage_PersistsAndNeverTouchesTheBroker`,
   `Send_EmptyInput_IsRejectedByThePipelineAsAFailedResult`.
 
-### [ ] 1.10 Wire the MassTransit publishers and receive endpoints
-Files: `src/Chat.Infrastructure/Messaging/*`, `src/Chat.Application/Abstractions/Messaging/*`
+### [x] 1.10 Wire the MassTransit publishers and receive endpoints
+Files: `src/Chat.Infrastructure/Messaging/{MassTransitStockQuoteRequester,MassTransitStockQuoteResponder,StockQuoteEndpointExtensions}.cs`, `src/Chat.Infrastructure/DependencyInjection.cs`, `src/Chat.Infrastructure/HealthChecks/*`, `src/Chat.Application/Contracts/Messaging/StockQuoteResolved.cs`, `docs/ARCHITECTURE.md`
 Acceptance:
-- `IStockQuoteRequester` / `IStockQuoteResponder` implemented over `IPublishEndpoint`, so Application still depends on its own abstractions and never on MassTransit.
-- Receive endpoints named from `MessagingConstants` (`stock-quote-requests`, `stock-quote-responses`); each host passes only its own consumers into `AddMessaging(...)`.
-- Retry policy `Interval(RetryLimit, RetryIntervalSeconds)`; exhausted messages land in `<queue>_error`, never requeue forever.
+- `IStockQuoteRequester` / `IStockQuoteResponder` implemented over `IPublishEndpoint` and registered by
+  `AddMessaging`, so Application still depends on its own abstractions and never on MassTransit
+  (`AbstractionsTests.Application_ReferencesNoInfrastructureFramework` still passes).
+- Receive endpoints named from `MessagingConstants` (`stock-quote-requests`, `stock-quote-responses`);
+  each host passes only its own consumers into `AddMessaging(...)`.
+- Retry policy `Interval(RetryLimit, RetryIntervalSeconds)`; exhausted messages land in `<queue>_error`,
+  never requeue forever.
 - Credentials come from user-secrets/env, never `appsettings.json`.
-- **Re-measure the broker health checks now that receive endpoints exist:** stop RabbitMQ and confirm `masstransit-bus` reports unhealthy. If it does, delete `RabbitMqHealthCheck` + `AddChatBroker` and rely on the bus check alone (it costs nothing; ours opens a connection per probe). If it does not, keep ours and record the measurement.
-Unit tests: `Serializer_RoundTrip_PreservesContract` for both contracts; publisher tests using MassTransit's `ITestHarness` in-memory transport (`Publish_StockQuoteRequested_IsSentToBus`) — no broker required.
+Decisions taken here (later tasks must conform):
+- **Both adapters are `internal sealed` and registered `TryAddScoped`, matching MassTransit's own
+  lifetime for `IPublishEndpoint`.** Inside a consumer the scoped endpoint carries the current
+  `ConsumeContext`, which is what propagates `ConversationId` across the request→response round trip; a
+  singleton adapter would capture a scoped dependency and fail scope validation anyway. They `Publish`
+  rather than `Send`: the producer names a message type, not a destination.
+- **`StockQuoteEndpointExtensions.AddStockQuoteRequestConsumer<T>()` /
+  `AddStockQuoteResponseConsumer<T>()` are the only supported way to register a consumer.** They apply
+  the endpoint name from `MessagingConstants` in one place, so 1.15/1.16 cannot invent a queue name and
+  cannot silently drift: `ConfigureEndpoints` would otherwise derive one from the class name
+  (`StockQuoteRequestConsumer` → `stock-quote-request`, singular), which is neither the documented
+  topology nor stable across a rename. Both tasks must call these instead of `AddConsumer<T>()`.
+- **`StockQuoteOutcome` now carries `[JsonConverter(typeof(JsonStringEnumConverter<StockQuoteOutcome>))]`.**
+  Measured: MassTransit's default `System.Text.Json` options serialise an enum as its ordinal
+  (`"outcome":1`), so the "serialised as a string" note written in 0.6 was false and inserting a member
+  would have re-interpreted messages already queued. The converter sits on the type, not on a bus
+  configuration, so it holds wherever the contract is serialised.
+- **The broker health-check question from 0.9 is closed: `RabbitMqHealthCheck` + `AddChatBroker` stay.**
+  Re-measured against Chat.Bot running a real receive endpoint on `stock-quote-requests` (a throwaway
+  consumer used for the measurement only, never committed): with everything up `masstransit-bus` is
+  `Healthy`; with the broker already down at startup it is `Unhealthy` ("Not ready: not started", 503);
+  but with the broker stopped **after** a healthy start it reports `Degraded` ("Degraded Endpoints:
+  stock-quote-requests") in 4 samples over 60 s — and `Degraded` maps to HTTP 200, so with the bus check
+  alone `/health/ready` would answer 200 while no quote can flow. Our probe went `Unhealthy` immediately and drove
+  503. The third row is the outage that actually happens, so ours is kept. Table in `ARCHITECTURE.md` §9.
+- **Retry and dead-lettering verified against the real broker,** same throwaway consumer, made to throw:
+  4 delivery attempts ~2 s apart (initial + `RetryLimit = 3` at `RetryIntervalSeconds = 2`), after which
+  the message sat in `stock-quote-requests_error` (1 message) and `stock-quote-requests` was back to 0 —
+  no infinite requeue. Both measurement queues and their exchanges were deleted afterwards.
+- **Known defect, owned by 1.15, found while measuring:** `dotnet run --project src/Chat.Bot` throws at
+  startup. Reproduced at `4f3bd2f` before this task, so it landed with 1.9: `AddApplication()` scans the
+  whole assembly, so MediatR registers `PostMessageHandler` and `GetLatestMessagesHandler` in the bot,
+  and Development's `ValidateOnBuild` rejects them because the bot has no `IChatRoomRepository`. This
+  task removes one of the three failures (`IStockQuoteRequester` now resolves); the bot still needs
+  `AddSystemClock()` for `IDateTimeProvider` and a way not to register Web-only handlers.
+Unit tests (`tests/Chat.UnitTests/Infrastructure/Messaging/`, 31 cases — no broker, verified green with
+the container stopped):
+- `StockQuoteContractSerializationTests` (9), against the exact `JsonSerializerOptions` MassTransit puts
+  on the wire: `Serializer_RoundTrip_PreservesContract` (`[Theory]` over both contracts),
+  `Serializer_RoundTrip_PreservesTheOutcome` (`[Theory]` over all three enum members),
+  `Serializer_Outcome_IsWrittenAsItsNameNotItsOrdinal`, `Serializer_RoundTrip_KeepsAnAbsentPriceAbsent`,
+  `Serializer_RoundTrip_PreservesThePriceExactly`, `Serializer_RoundTrip_PreservesTheRequestInstant`.
+- `StockQuotePublisherTests` (9), over MassTransit's in-memory `ITestHarness`:
+  `Publish_StockQuoteRequested_IsSentToBus`, `Publish_StockQuoteResolved_IsSentToBus`,
+  `Publish_StockQuoteRequested_CarriesTheContractUnchanged`,
+  `Publish_StockQuoteResolved_CarriesTheContractUnchanged`,
+  `Publish_StockQuoteRequested_IsPublishedNotSentToAQueue`,
+  `RequestAsync_Always_ForwardsTheCallersCancellationToken`,
+  `RespondAsync_Always_ForwardsTheCallersCancellationToken`, `RequestAsync_NullRequest_Throws`,
+  `RespondAsync_NullResponse_Throws`.
+- `StockQuoteEndpointExtensionsTests` (6): `AddStockQuoteRequestConsumer_BindsTheConsumerToTheRequestEndpoint`
+  and `AddStockQuoteResponseConsumer_BindsTheConsumerToTheResponseEndpoint` (assert the *received*
+  message's input-queue address, not the registration call),
+  `EndpointNames_ComeFromMessagingConstants_NotFromTheConsumerClassName` (`[Theory]`),
+  `AddStockQuoteRequestConsumer_NullConfigurator_Throws`, `AddStockQuoteResponseConsumer_NullConfigurator_Throws`.
+- `AddMessagingTests` (7): `AddMessaging_ResolvesTheOutboundStockQuotePorts` (`[Theory]`),
+  `AddMessaging_RegistersTheOutboundPortsAsScoped` (`[Theory]`),
+  `AddMessaging_BindsTheBrokerSettingsFromConfiguration`, `RabbitMqOptions_CarryNoDefaultCredentials`,
+  `AddMessaging_WithoutConsumers_StillRegistersTheBus`.
 
 ### [ ] 1.11 Add Identity, authentication and the seeded default room to Chat.Web
 Files: `src/Chat.Web/Program.cs`, `src/Chat.Web/Areas/Identity/*`, `src/Chat.Infrastructure/Persistence/ChatDbSeeder.cs`
@@ -441,6 +502,17 @@ Acceptance:
 - Exact wording on success: `"AAPL.US quote is $93.42 per share"` (price formatted with 2 decimals, invariant culture).
 - Unknown symbol and lookup failure produce friendly messages and `Outcome != Quoted`; the handler never throws.
 - The worker is a `BackgroundService`, fully async, honours `stoppingToken`.
+Inherited from 1.10 (do not rediscover):
+- Register the consumer with `configurator.AddStockQuoteRequestConsumer<StockQuoteRequestConsumer>()`,
+  never `AddConsumer<T>()` — that extension is what pins the endpoint to
+  `MessagingConstants.StockQuoteRequestQueue`. `IStockQuoteResponder` is already registered by
+  `AddMessaging`, so the bot only has to consume and publish.
+- **Fix the bot's startup first.** `dotnet run --project src/Chat.Bot` currently throws: `AddApplication()`
+  makes MediatR register `PostMessageHandler` / `GetLatestMessagesHandler` in the bot, and Development's
+  `ValidateOnBuild` rejects them because the bot has no `IChatRoomRepository` (by design — it must never
+  call `AddPersistence()`). The bot also needs `AddSystemClock()` for `IDateTimeProvider`. Simplest fix
+  that keeps the layering: give `AddApplication` a way to register only the handlers a host can satisfy
+  (MediatR's `TypeEvaluator`), rather than handing the bot a repository.
 Unit tests:
 - `Handle_ValidQuote_PublishesExpectedMessageFormat`
 - `Handle_SymbolNotFound_PublishesFriendlyMessage`
@@ -452,6 +524,12 @@ Acceptance:
 - Consumer deserialises `StockQuoteResolved` and sends `PostBotMessageCommand`.
 - `PostBotMessageHandler` creates a `Message` via `Message.PostByBot`, persists it and broadcasts to the room group.
 - Unparseable payloads are dead-lettered, not requeued.
+Inherited from 1.10 (do not rediscover):
+- Register the consumer with `configurator.AddStockQuoteResponseConsumer<StockQuoteResponseConsumer>()`,
+  never `AddConsumer<T>()`, so the endpoint stays `MessagingConstants.StockQuoteResponseQueue`.
+- Dead-lettering needs no code: measured against the real broker, `Interval(3, 2s)` runs 4 attempts and
+  then MassTransit moves the message to `<queue>_error`. Do not add a manual nack path.
+- Reuse `Chat.Application/Errors/ChatRoomErrors.NotFound` (promoted in 1.9) for the unknown-room failure.
 Unit tests: `Handle_BotMessage_PersistsWithBotAuthorAndBroadcasts`, `Handle_UnknownRoom_ReturnsFailureWithoutBroadcast`.
 
 ### [ ] 1.17 Add the integration test suite

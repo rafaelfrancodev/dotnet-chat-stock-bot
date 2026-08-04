@@ -15,8 +15,9 @@ public static class HealthCheckNames
     /// <summary>
     /// Bus lifecycle state. Registered and named by MassTransit itself when the bus is added, not by
     /// us — declared here only so the name has one documented home. It already carries the
-    /// <see cref="ReadyTag"/> tag, so it appears in <c>/health/ready</c> automatically.
-    /// Note it reports readiness of the bus, not reachability of the broker.
+    /// <see cref="ReadyTag"/> tag, so it appears in <c>/health/ready</c> automatically. It reports
+    /// readiness of the bus rather than reachability of the broker, and only reaches <c>Degraded</c>
+    /// when a running bus loses the broker — see <c>RabbitMqHealthCheck</c> for the measurement.
     /// </summary>
     public const string MassTransitBus = "masstransit-bus";
 
