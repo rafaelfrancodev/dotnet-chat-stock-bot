@@ -1,0 +1,28 @@
+@using System.Security.Claims
+@using Chat.Infrastructure.Identity
+@using Microsoft.AspNetCore.Identity
+@inject SignInManager<ApplicationUser> SignInManager
+
+@* Logging out is a POST, so a cross-site link cannot sign a participant out. *@
+<ul class="navbar-nav">
+    @if (SignInManager.IsSignedIn(User))
+    {
+        <li class="nav-item">
+            <span class="nav-link text-dark">Hello @(User.FindFirstValue(ChatClaimTypes.DisplayName) ?? User.Identity?.Name)!</span>
+        </li>
+        <li class="nav-item">
+            <form class="form-inline" asp-area="Identity" asp-page="/Account/Logout" asp-route-returnUrl="@Url.Content("~/")" method="post">
+                <button id="logout" type="submit" class="nav-link btn btn-link text-dark border-0">Log out</button>
+            </form>
+        </li>
+    }
+    else
+    {
+        <li class="nav-item">
+            <a class="nav-link text-dark" id="register" asp-area="Identity" asp-page="/Account/Register">Register</a>
+        </li>
+        <li class="nav-item">
+            <a class="nav-link text-dark" id="login" asp-area="Identity" asp-page="/Account/Login">Log in</a>
+        </li>
+    }
+</ul>

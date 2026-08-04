@@ -7,13 +7,13 @@ namespace Chat.Web.Hubs;
 /// The realtime chat surface.
 /// </summary>
 /// <remarks>
-/// Deliberately empty for now: task 1.11 wires authentication and task 1.12 adds <c>JoinRoom</c>,
-/// <c>SendMessage</c> and the <c>[Authorize]</c> attribute. The type exists already so
-/// <see cref="Realtime.SignalRChatNotifier"/> has a hub to target, which is what lets
-/// <c>PostMessageHandler</c> resolve its notifier.
+/// Deliberately empty for now: task 1.11 wired authentication (Identity, cookie, protected chat page)
+/// and task 1.12 adds <c>JoinRoom</c>, <c>SendMessage</c> and the <c>[Authorize]</c> attribute. The
+/// type exists already so <see cref="Realtime.SignalRChatNotifier"/> has a hub to target, which is what
+/// lets <c>PostMessageHandler</c> resolve its notifier.
 /// <para>
-/// The endpoint is <b>not mapped</b> in <c>Program.cs</c> until 1.12: mapping it now, before
-/// authentication exists, would expose an unauthenticated realtime surface.
+/// The endpoint is still <b>not mapped</b> in <c>Program.cs</c>: a hub with no methods has nothing to
+/// authorise, so mapping and <c>[Authorize]</c> land together in 1.12 with the first method.
 /// </para>
 /// </remarks>
 public sealed class ChatHub : Hub

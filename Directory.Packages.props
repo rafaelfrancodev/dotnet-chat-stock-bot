@@ -45,6 +45,9 @@
     <!-- FluentAssertions is pinned to the 7.x line: 8.x switched to the Xceed commercial licence. -->
     <PackageVersion Include="FluentAssertions" Version="7.2.2" />
     <PackageVersion Include="NSubstitute" Version="6.0.0" />
+    <!-- Test-only relational provider: lets ChatDbSeeder be exercised against a real unique index,
+         in memory, with no container. Production stays SQL Server (see docs/ARCHITECTURE.md §6). -->
+    <PackageVersion Include="Microsoft.EntityFrameworkCore.Sqlite" Version="10.0.10" />
     <PackageVersion Include="xunit" Version="2.9.3" />
     <PackageVersion Include="xunit.runner.visualstudio" Version="3.1.4" />
     <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
@@ -54,6 +57,17 @@
     <!-- Integration tests run against a throwaway SQL Server container so they use the same
          provider as production. Referenced by Chat.IntegrationTests from task 1.17 onwards. -->
     <PackageVersion Include="Testcontainers.MsSql" Version="4.13.0" />
+  </ItemGroup>
+
+  <ItemGroup Label="Transitive pins (security)">
+    <!-- EF Core 10.0.10's SQLite provider still resolves SQLitePCLRaw 2.1.11, which carries
+         GHSA-2m69-gcr7-jv3q (high severity) and fails restore under NuGet audit. 2.1.12 is the patched
+         release. These pins exist only because the test project uses SQLite in memory to exercise
+         ChatDbSeeder against a real unique index; no production project references SQLite. -->
+    <PackageVersion Include="SQLitePCLRaw.bundle_e_sqlite3" Version="2.1.12" />
+    <PackageVersion Include="SQLitePCLRaw.core" Version="2.1.12" />
+    <PackageVersion Include="SQLitePCLRaw.lib.e_sqlite3" Version="2.1.12" />
+    <PackageVersion Include="SQLitePCLRaw.provider.e_sqlite3" Version="2.1.12" />
   </ItemGroup>
 
 </Project>

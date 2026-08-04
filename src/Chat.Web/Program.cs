@@ -3,6 +3,8 @@ using Chat.Application.Abstractions.Hosting;
 using Chat.Application.Abstractions.Realtime;
 using Chat.Infrastructure;
 using Chat.Infrastructure.HealthChecks;
+using Chat.Infrastructure.Persistence;
+using Chat.Web.Identity;
 using Chat.Web.Realtime;
 
 WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
@@ -13,6 +15,9 @@ builder.Services.AddApplication<IWebFeature>();
 builder.Services.AddSystemClock();
 builder.Services.AddPersistence(builder.Configuration);
 builder.Services.AddMessaging(builder.Configuration);
+
+// Registration, login and logout come from Identity's default UI over the same ChatDbContext.
+builder.Services.AddChatIdentity(requireSecureCookie: !builder.Environment.IsDevelopment());
 
 // The realtime adapter lives here because IHubContext belongs to the host that owns the hub.
 builder.Services.AddSignalR();
@@ -27,6 +32,10 @@ builder.Services.AddHealthChecks()
 builder.Services.AddRazorPages();
 
 WebApplication app = builder.Build();
+
+// Schema and the default room, before the first request. Idempotent, so this is equivalent to (and
+// safe alongside) running `dotnet ef database update` by hand; it logs whichever it did.
+await app.Services.InitializeChatDatabaseAsync(app.Lifetime.ApplicationStopping);
 
 if (!app.Environment.IsDevelopment())
 {

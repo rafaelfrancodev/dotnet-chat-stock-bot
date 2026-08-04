@@ -61,6 +61,10 @@ public static class DependencyInjection
         services.AddScoped<IMessageRepository, MessageRepository>();
         services.AddScoped<IUnitOfWork, UnitOfWork>();
 
+        // Startup migration and the default room. Needs IDateTimeProvider, which the host registers
+        // with AddSystemClock() — the clock is not persistence, so it stays a separate opt-in.
+        services.AddScoped<ChatDbSeeder>();
+
         return services;
     }
 

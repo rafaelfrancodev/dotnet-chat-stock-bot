@@ -1,3 +1,4 @@
+using Chat.Infrastructure.Persistence;
 using Microsoft.AspNetCore.Identity;
 
 namespace Chat.Infrastructure.Identity;
@@ -13,6 +14,12 @@ namespace Chat.Infrastructure.Identity;
 /// </remarks>
 public sealed class ApplicationUser : IdentityUser
 {
+    /// <summary>
+    /// Upper bound on <see cref="DisplayName"/>, published so the registration form can reject an
+    /// over-long name with a validation message instead of letting the insert truncate or fail.
+    /// </summary>
+    public const int DisplayNameMaxLength = PersistenceConstants.DisplayNameMaxLength;
+
     /// <summary>
     /// Human-readable name shown as the post owner in the chat window. Bounded to the same length as
     /// Identity's own <c>UserName</c> so it always fits the message author column.

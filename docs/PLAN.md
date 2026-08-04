@@ -479,17 +479,46 @@ the container stopped):
   `AddMessaging_BindsTheBrokerSettingsFromConfiguration`, `RabbitMqOptions_CarryNoDefaultCredentials`,
   `AddMessaging_WithoutConsumers_StillRegistersTheBus`.
 
-### [ ] 1.11 Add Identity, authentication and the seeded default room to Chat.Web
-Files: `src/Chat.Web/Program.cs`, `src/Chat.Web/Areas/Identity/*`, `src/Chat.Infrastructure/Persistence/ChatDbSeeder.cs`
-Acceptance:
-- Register/login/logout work through the default Identity UI; cookie is HttpOnly + SameSite=Lax + Secure.
-- `ApplicationUser` (1.7) already exists with `DisplayName` (`nvarchar(256)`, required): wire
-  `AddDefaultIdentity<ApplicationUser>().AddEntityFrameworkStores<ChatDbContext>()` and capture the
-  display name at registration — an empty one would make every post render blank.
-- Default password policy and lockout untouched.
-- Migrations applied and a `General` room seeded at startup.
-- Anonymous users are redirected to login when opening the chat page.
-Unit tests: none; covered by 1.16.
+### [x] 1.11 Add Identity, authentication and the seeded default room to Chat.Web
+Files: `src/Chat.Web/{Program.cs,Identity/IdentityServiceCollectionExtensions.cs,Areas/Identity/Pages/Account/Register.cshtml(.cs),Pages/Chat.cshtml(.cs),Pages/Shared/_LoginPartial.cshtml}`, `src/Chat.Infrastructure/Identity/{ChatClaimTypes,DisplayNameClaimsPrincipalFactory}.cs`, `src/Chat.Infrastructure/Persistence/{ChatDbSeeder,ChatDatabaseInitializationExtensions}.cs`
+Acceptance: all met — see the verification below.
+Decisions taken here (later tasks must conform):
+- **The Register page is scaffolded to capture `DisplayName`** (required, `nvarchar(256)`). The stock
+  Identity UI cannot, and an empty name would make every post render blank in the two-browser review.
+- **`DisplayNameClaimsPrincipalFactory` puts the name in the auth cookie** as `ChatClaimTypes.DisplayName`
+  (`"display_name"`). The hub reads the author from `Context.User`, so this costs no `AspNetUsers` query
+  per message. **1.12 must read the display name from this claim, never from a client payload.**
+- **Cookie**: `HttpOnly` always, `SameSite=Lax` always, `SecurePolicy=Always` outside Development and
+  `SameAsRequest` in Development — the documented local run is plain HTTP on 5271, where an `Always`
+  cookie would never come back and every login would silently appear to fail.
+- Password policy and lockout are untouched. Only `SignIn.RequireConfirmedAccount = false` is pinned:
+  the deliverable ships no email sender, so a required confirmation could never be delivered.
+- **`ChatDbSeeder` lives in Infrastructure next to `ChatDbContext`**, so `Chat.Bot` — which never calls
+  `AddPersistence()` — cannot reach it. The room is created through `ChatRoom.Create` and the injected
+  clock, never raw SQL: seeded data obeys the same invariants as user data.
+- **`InitialCreate` was regenerated as a single migration.** Registering Identity in DI makes
+  `IdentityDbContext` apply `MaxLengthForKeys = 128`, which diffs against 1.7's 450 on columns that are
+  **primary keys** — so EF's generated `ALTER` could never apply (`SqlException 5074: The object
+  'PK_AspNetUserTokens' is dependent on column 'Name'`). One coherent migration beats a second one that
+  cannot run. Nothing was deployed, so this is safe.
+- `ChatHub` is still **not mapped**: a hub with no methods has nothing to authorise, so mapping and
+  `[Authorize]` land together in 1.12 with the first method.
+- `Pages/Chat.cshtml` is a deliberately minimal authenticated landing point proving the redirect; 1.13
+  builds the real page.
+Unit tests (`tests/Chat.UnitTests/Infrastructure/Persistence/ChatDbSeederTests.cs`, 7 cases): the seeder
+creates the room through the domain factory, stamps it from the injected clock, is idempotent across
+repeated calls and fresh boots, **survives losing the insert race to a concurrent instance** (the unique
+index is the backstop), and still rethrows any other write failure. Run against SQLite in process memory
+so a real unique index is enforced with no container — which required restoring the `SQLitePCLRaw` 2.1.12
+pins, since EF's SQLite provider resolves an advisory-carrying 2.1.11.
+**Verified** against the running stack:
+- Registration through the real UI → `302 -> /Chat`; `AspNetUsers` holds `DisplayName=[Alice Anderson]`
+  (len 14), so the display name is genuinely captured and persisted.
+- `ChatRooms` holds exactly one `General` row; after a full host restart it is still exactly one, and the
+  log reads "schema is up to date; no migration applied".
+- Anonymous `GET /Chat` → `302 -> /Identity/Account/Login?ReturnUrl=%2FChat`.
+- `FKS_ON_MESSAGES=0` — 1.7's no-foreign-key decision survived the migration regeneration.
+- Both hosts start with zero unhandled exceptions; `/health` 200 on each.
 
 ### [ ] 1.12 Implement ChatHub and the SignalR notifier
 Files: `src/Chat.Web/Hubs/ChatHub.cs`, `src/Chat.Web/Realtime/SignalRChatNotifier.cs`

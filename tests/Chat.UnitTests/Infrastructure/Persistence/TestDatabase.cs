@@ -1,5 +1,7 @@
 using Chat.Infrastructure.Persistence;
+using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
 
@@ -24,6 +26,36 @@ internal static class TestDatabase
             .Options;
 
         return new ChatDbContext(options);
+    }
+
+    /// <summary>
+    /// An empty database in process memory, created from the same mapping, over a real relational
+    /// provider — so a unique index is genuinely enforced. Used by the seeder tests, which have to
+    /// execute queries rather than only inspect metadata. The connection is the caller's to dispose:
+    /// the database lives exactly as long as it stays open.
+    /// </summary>
+    /// <param name="connection">An open SQLite connection, shared by every context in one test.</param>
+    /// <param name="interceptors">Interceptors used to simulate what a second host would do concurrently.</param>
+    public static ChatDbContext CreateInMemoryContext(SqliteConnection connection, params IInterceptor[] interceptors)
+    {
+        DbContextOptions<ChatDbContext> options = new DbContextOptionsBuilder<ChatDbContext>()
+            .UseSqlite(connection)
+            .AddInterceptors(interceptors)
+            .Options;
+
+        return new ChatDbContext(options);
+    }
+
+    /// <summary>Opens the connection and creates the schema from the model.</summary>
+    public static SqliteConnection OpenInMemoryDatabase()
+    {
+        SqliteConnection connection = new("DataSource=:memory:");
+        connection.Open();
+
+        using ChatDbContext context = CreateInMemoryContext(connection);
+        context.Database.EnsureCreated();
+
+        return connection;
     }
 
     /// <summary>
