@@ -86,10 +86,13 @@ Acceptance:
 Unit tests (`tests/Chat.UnitTests/Domain/Messages/`):
 - `Create_EmptyContent_ReturnsFailure`, `Create_WhitespaceOnly_ReturnsFailure`, `Create_TooLong_ReturnsFailure`, `Create_ValidContent_TrimsAndSucceeds`, `Equality_SameValue_AreEqual`.
 
-### [ ] 1.2 Model the StockCode value object
+### [x] 1.2 Model the StockCode value object
 Files: `src/Chat.Domain/StockCommands/StockCode.cs`
 Acceptance:
 - Normalises to lower case and trims; validates `^[a-z0-9.\-]{1,20}$`; `Display` returns upper case.
+- Implemented as `StockCode.MaxLength` (length check) + a `[GeneratedRegex]` character allow-list
+  anchored with `\A`/`\z` (in .NET `$` also matches before a trailing newline). Casing is
+  `ToLowerInvariant`/`ToUpperInvariant` — culture-sensitive casing would break tickers under tr-TR.
 - Rejects empty, `> 20` chars, spaces, and any character usable for URL/parameter injection (`&`, `?`, `/`, `=`, `%`, `#`).
 Unit tests (`tests/Chat.UnitTests/Domain/StockCommands/StockCodeTests.cs`):
 - `Create_MixedCase_NormalisesToLowerCase`, `Create_Empty_ReturnsFailure`, `Create_TooLong_ReturnsFailure`, `Create_ContainsUrlInjectionCharacters_ReturnsFailure` (`[Theory]`), `Display_ValidCode_ReturnsUpperCase`.
