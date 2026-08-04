@@ -1,6 +1,7 @@
 using Chat.Application.Abstractions.Messaging;
 using Chat.Application.Abstractions.Persistence;
 using Chat.Application.Contracts.Messages;
+using Chat.Application.Errors;
 using Chat.Domain.Common;
 
 namespace Chat.Application.Features.Messages.GetLatestMessages;
@@ -35,7 +36,7 @@ internal sealed class GetLatestMessagesHandler(
         if (!roomExists)
         {
             // Checked first so an unknown room costs one existence query, never a history read.
-            return Result.Failure<IReadOnlyList<MessageDto>>(GetLatestMessagesQuery.Errors.ChatRoomNotFound);
+            return Result.Failure<IReadOnlyList<MessageDto>>(ChatRoomErrors.NotFound);
         }
 
         IReadOnlyList<MessageDto> latest = await messages

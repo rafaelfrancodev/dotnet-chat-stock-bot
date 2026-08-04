@@ -1,7 +1,6 @@
 using Chat.Application.Abstractions.Messaging;
 using Chat.Application.Contracts.Messages;
 using Chat.Domain.ChatRooms;
-using Chat.Domain.Common;
 using Chat.Domain.Messages;
 
 namespace Chat.Application.Features.Messages.GetLatestMessages;
@@ -19,17 +18,4 @@ namespace Chat.Application.Features.Messages.GetLatestMessages;
 public sealed record GetLatestMessagesQuery(
     ChatRoomId ChatRoomId,
     int Count = MessageConstants.LatestMessagesCount)
-    : IQuery<IReadOnlyList<MessageDto>>
-{
-    /// <summary>Expected failures of this query, with stable codes for tests and clients.</summary>
-    /// <remarks>
-    /// Declared on the query rather than on the handler because the handler is internal: the request and
-    /// the failures it can produce are the public surface of the feature.
-    /// </remarks>
-    public static class Errors
-    {
-        /// <summary>The requested room does not exist, so there is no history to read.</summary>
-        public static readonly Error ChatRoomNotFound =
-            Error.NotFound("ChatRoom.NotFound", "The chat room was not found.");
-    }
-}
+    : IQuery<IReadOnlyList<MessageDto>>;

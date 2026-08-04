@@ -109,8 +109,18 @@ single highest-value unit-test target in the repo.
 | `MessagePosted(MessageId, ChatRoomId, MessageAuthor, MessageContent, DateTimeOffset)` | `Message.PostBy*` | application handler that broadcasts through `IChatNotifier` |
 
 `IDomainEvent` is framework-free (no `MediatR.INotification` in the Domain). `AggregateRoot<TId>` records
-events; the Application dispatches them **after** the unit of work commits, so a failed save never produces
-a phantom broadcast.
+events; anything acting on them runs **after** the unit of work commits, so a failed save never produces a
+phantom broadcast.
+
+**Where the broadcast actually happens (decided in task 1.9).** `MessagePosted` is recorded by the
+aggregate but there is no domain-event dispatcher: `PostMessageHandler` calls `IChatNotifier` itself, on
+the line after `SaveChangesAsync`. The ordering guarantee is identical — nothing is announced before it is
+committed — and a dispatcher would buy nothing here, because the event has exactly one subscriber, in the
+same use case, with no second reader in sight. It would, however, add an infrastructure component that
+intercepts `SaveChangesAsync`, hides the broadcast from the handler that is responsible for it, and makes
+"was this broadcast after the commit?" a question about framework configuration rather than about two
+adjacent lines of code. The event is still raised, so introducing a dispatcher later is additive.
+`PostBotMessageHandler` (task 1.16) follows the same shape.
 
 `StockCommandReceived` is deliberately **not** a domain event: no aggregate is created or mutated when a
 stock command is typed, so there is nothing to raise it from. The command is recognised by the parser and
@@ -157,10 +167,16 @@ interface.
 
 | Feature folder | Request | Returns | Notes |
 | --- | --- | --- | --- |
-| `Features/Messages/PostMessage` | `PostMessageCommand(ChatRoomId, RawInput, AuthorUserId, AuthorDisplayName)` | `Result<PostMessageResponse>` | The branch point of the whole challenge (see §5) |
+| `Features/Messages/PostMessage` | `PostMessageCommand(ChatRoomId, RawInput, AuthorUserId, AuthorDisplayName)` | `Result<PostMessageOutcome>` | The branch point of the whole challenge (see §5) |
 | `Features/Messages/GetLatestMessages` | `GetLatestMessagesQuery(ChatRoomId, Count = 50)` | `Result<IReadOnlyList<MessageDto>>` | |
 | `Features/Messages/PostBotMessage` | `PostBotMessageCommand(ChatRoomId, Text)` | `Result` | Invoked by the Web-side broker consumer |
 | `Features/StockCommands/RequestStockQuote` | `RequestStockQuoteCommand(ChatRoomId, StockCode, RequestedByUserId, RequestedByDisplayName)` | `Result` | Publishes to RabbitMQ. **No repository dependency at all** |
+
+`PostMessageOutcome` is an enum (`Posted` / `QuoteRequested`), not a response DTO. The broadcast has
+already happened by the time the hub sees the result, so returning the created post would invite a hub to
+echo it back and render the message twice; the outcome is the minimum a caller needs to know which branch
+ran. Errors shared by more than one use case live in `Chat.Application/Errors` (`ChatRoomErrors.NotFound`);
+single-feature failures stay nested on their request type.
 | `Features/StockCommands/ResolveStockQuote` | `ResolveStockQuoteCommand(StockQuoteRequested)` | `Result` | Runs **inside Chat.Bot**: Stooq lookup + format + publish response |
 | `Features/Rooms/CreateRoom` | `CreateRoomCommand(Name, CreatedByUserId)` | `Result<Guid>` | Bonus: multiple rooms |
 | `Features/Rooms/ListRooms` | `ListRoomsQuery()` | `Result<IReadOnlyList<ChatRoomSummaryDto>>` | Bonus |
@@ -302,13 +318,24 @@ Browser                Chat.Web                        RabbitMQ                 
    │  ◀── ReceiveMessage ── IChatNotifier.BroadcastAsync(roomId, botMessage)
 ```
 
-**The "never persist the stock command" rule is enforced in exactly one place:**
-`PostMessageHandler` branches on the parser result and, on the `StockQuote` branch, returns without ever
-touching `IMessageRepository`. Structurally reinforced by `RequestStockQuoteHandler` having **no**
-repository or `IUnitOfWork` dependency in its constructor — it is not possible for it to write a row.
+**The "never persist the stock command" rule is enforced by structure, in four layers:**
 
-Unit test that locks this down: `Handle_StockCommand_DoesNotPersistMessage` asserts
-`repository.DidNotReceive().Add(Arg.Any<Message>())` **and** `requester.Received(1).RequestAsync(...)`.
+1. `PostMessageHandler` classifies the input with `ChatCommandParser` before doing anything with it, and
+   branches on the closed `ParsedChatInput` hierarchy with a type `switch` — no string test to get wrong.
+2. The only method in that handler which touches `IMessageRepository` / `IUnitOfWork` takes a
+   `ParsedChatInput.PlainMessage` parameter. Persisting a command would mean turning a
+   `ParsedChatInput.StockQuote` into a plain message, which the type system does not allow.
+3. `RequestStockQuoteHandler` — the whole of the `/stock=` code path — has **no** repository and **no**
+   `IUnitOfWork` in its constructor, so nothing reachable from that branch can write a row.
+4. The `switch` ends in `UnreachableException`, so a fifth `ParsedChatInput` case fails loudly instead of
+   falling through into the persist path.
+
+Unit tests that lock this down: `Handle_StockCommand_DoesNotPersistMessage` asserts
+`messages.DidNotReceive().Add(Arg.Any<Message>())` **and**
+`unitOfWork.DidNotReceive().SaveChangesAsync(...)`; `Handle_StockCommand_PublishesStockQuoteRequest`
+asserts the request does reach the bot; and
+`Constructor_TakesNoPersistenceDependency_SoAStockCommandCanNeverBeWritten` reflects over
+`RequestStockQuoteHandler`'s constructor so that layer 3 is checked by the build.
 
 ### Bot message persistence — explicit decision
 
@@ -548,6 +575,7 @@ src/Chat.Application/
   Abstractions/Stocks/         IStockQuoteProvider
   Abstractions/Time/           IDateTimeProvider
   Behaviors/                   LoggingBehavior, ValidationBehavior
+  Errors/                      ChatRoomErrors (failures shared by more than one use case)
   Contracts/Messaging/         MessagingConstants, StockQuoteRequested, StockQuoteResolved
   Features/                    Messages/, Rooms/, StockCommands/
   DependencyInjection.cs       AddApplication()

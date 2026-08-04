@@ -1,5 +1,6 @@
 using Chat.Application.Abstractions.Persistence;
 using Chat.Application.Contracts.Messages;
+using Chat.Application.Errors;
 using Chat.Application.Features.Messages.GetLatestMessages;
 using Chat.Domain.ChatRooms;
 using Chat.Domain.Common;
@@ -73,7 +74,7 @@ public sealed class GetLatestMessagesHandlerTests
             await CreateHandler().Handle(new GetLatestMessagesQuery(RoomId), CancellationToken.None);
 
         result.IsFailure.Should().BeTrue();
-        result.Error.Should().Be(GetLatestMessagesQuery.Errors.ChatRoomNotFound);
+        result.Error.Should().Be(ChatRoomErrors.NotFound);
     }
 
     [Fact]

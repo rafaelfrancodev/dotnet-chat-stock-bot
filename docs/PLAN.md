@@ -282,9 +282,11 @@ Decisions taken here (later tasks must conform):
   Lower bound `GetLatestMessagesValidator.MinimumCount = 1` (0 or less is a caller bug, not an empty room).
 - **The room check runs first and short-circuits**, so an unknown room costs one `AnyAsync` and never a
   history read. The failure is `GetLatestMessagesQuery.Errors.ChatRoomNotFound` (`ChatRoom.NotFound`).
-- **`Errors` is nested on the query, not on the handler**, because the handler is `internal`: the request
-  and the failures it can produce are the public surface of a feature. 1.9 and 1.16 need the same
-  "unknown room" failure — when the second copy appears, promote it to one shared `ChatRoomErrors`.
+- **Failures are declared next to the request, not on the handler**, because the handler is `internal`:
+  the request and the failures it can produce are the public surface of a feature. The "unknown room"
+  failure was originally nested on this query; **1.9 promoted it to `Chat.Application/Errors/ChatRoomErrors.NotFound`**
+  when the second use case needed it, so the code `ChatRoom.NotFound` is defined once. `GetLatestMessagesQuery.Errors`
+  no longer exists; the handler and `GetLatestMessagesHandlerTests` use the shared class.
 - **Handlers and validators are `internal sealed`**; `Chat.Application.csproj` gained
   `InternalsVisibleTo Chat.UnitTests` (same reason and shape as `Chat.Infrastructure`). MediatR and
   FluentValidation both find them by assembly scan (`includeInternalTypes: true` was already set), and
@@ -304,18 +306,81 @@ Unit tests (`tests/Chat.UnitTests/Application/Features/Messages/`, 23 cases):
   `AddApplication_RegistersTheInternalValidator`,
   `Send_InvalidCount_IsRejectedByThePipelineAsAFailedResult` (validation failure → failed `Result`, not an exception).
 
-### [ ] 1.9 Implement PostMessage with the stock-command branch
-Files: `src/Chat.Application/Features/Messages/PostMessage/*`, `src/Chat.Application/Features/StockCommands/RequestStockQuote/*`
+### [x] 1.9 Implement PostMessage with the stock-command branch
+Files: `src/Chat.Application/Features/Messages/PostMessage/{PostMessageCommand,PostMessageOutcome,PostMessageHandler,PostMessageValidator}.cs`, `src/Chat.Application/Features/StockCommands/RequestStockQuote/{RequestStockQuoteCommand,RequestStockQuoteHandler}.cs`, `src/Chat.Application/Errors/ChatRoomErrors.cs`
 Acceptance:
-- `PostMessageHandler` parses first: plain message → persist + notify; stock command → dispatch `RequestStockQuoteCommand`, **no repository call**; unknown command → failed `Result`, nothing persisted or published.
+- `PostMessageHandler` checks the room, then classifies: plain message → persist + notify; stock command → dispatch `RequestStockQuoteCommand`, **no repository call**; unknown command → failed `Result`; malformed command → the parser's own `Error`. Nothing but a plain message is ever persisted or broadcast.
 - `RequestStockQuoteHandler` has no repository/`IUnitOfWork` dependency and publishes through `IStockQuoteRequester`.
-- `PostMessageValidator` rejects an empty room id and empty raw input.
-Unit tests (highest-value tests in the repo):
-- `Handle_PlainMessage_PersistsAndNotifies`
-- `Handle_StockCommand_DoesNotPersistMessage` (asserts `repository.DidNotReceive().Add(...)`)
-- `Handle_StockCommand_PublishesStockQuoteRequest`
-- `Handle_UnknownCommand_ReturnsFailureAndPersistsNothing`
-- `Handle_UnknownRoom_ReturnsFailure`
+- `PostMessageValidator` rejects an empty room id, empty/whitespace raw input, an over-long line and an empty author identity.
+Decisions taken here (later tasks must conform):
+- **"A stock command is never saved" is enforced by structure, in four layers, not by discipline:**
+  (1) the input is classified by `ChatCommandParser` before anything else and the branch is a type
+  `switch` over the closed `ParsedChatInput` hierarchy; (2) the only method that touches
+  `IMessageRepository`/`IUnitOfWork` takes a `ParsedChatInput.PlainMessage`, so persisting a command
+  would require turning a `StockQuote` into a plain message — the type system forbids it; (3)
+  `RequestStockQuoteHandler`, the whole of the `/stock=` path, is constructed without any persistence
+  port; (4) the `switch` ends in `UnreachableException`, so a fifth case fails loudly instead of falling
+  into the persist path.
+- **The stock branch goes through `ISender`, not straight to `IStockQuoteRequester`.** Publishing inline
+  would have made `RequestStockQuoteHandler`'s "no persistence dependency" decorative — the guarantee is
+  only worth something if the request path really is that handler. It also keeps both use cases
+  independently dispatchable (1.12's hub, 2.2's rooms) and gives the stock command the same validation
+  and logging pipeline as every other request. Cost: one nested mediator dispatch per `/stock=` line,
+  negligible next to the broker round trip it precedes.
+- **`RequestStockQuoteCommand` carries no request id and no timestamp.** The handler mints
+  `Guid.CreateVersion7()` and reads `IDateTimeProvider`, so no caller can replay a correlation id or
+  backdate a request. It carries a `StockCode`, not a `string`: an unvalidated ticker is not expressible.
+- **Identity is a documented contract, not a hope.** `AuthorUserId`/`AuthorDisplayName` are filled by the
+  hub from `Context.User`; the client payload carries only `ChatRoomId` and `RawInput`. The command has no
+  origin flag, no author flag and no post time, so a caller cannot ask to post as somebody else, as the
+  bot, or at a chosen instant. Recorded on the type itself so 1.12 cannot get it wrong.
+- **The broadcast is done by the handler, on the line after `SaveChangesAsync`,** not by a domain-event
+  dispatcher. Same ordering guarantee (nothing announced before it is committed) with one subscriber, in
+  one use case, in two adjacent lines. `MessagePosted` is still raised, so a dispatcher stays additive.
+  `ARCHITECTURE.md` §2.4 records the reasoning.
+- **An unknown command is answered with fixed text.** `UnknownCommand.CommandName` is untrusted and
+  unbounded, so it is never echoed into an error message; the hub returns the failure to `Clients.Caller`
+  only (1.12).
+- **`PostMessageOutcome` is an enum, not a response DTO.** The broadcast has already happened when the
+  caller sees the result, so returning the post would invite a hub to render it twice.
+- `GetLatestMessagesQuery.Errors.ChatRoomNotFound` was promoted to `Chat.Application/Errors/ChatRoomErrors.NotFound`
+  (see the note in 1.8); 1.16 must reuse it rather than declare a third copy.
+Unit tests (`tests/Chat.UnitTests/Application/Features/`, 62 cases — the highest-value tests in the repo):
+- `PostMessageHandlerTests` (31): `Handle_PlainMessage_PersistsAndNotifies`,
+  `Handle_PlainMessage_PersistsTheClaimsAuthorTheRoomAndTheClockInstant`,
+  `Handle_PlainMessage_CommitsBeforeBroadcasting`, `Handle_PlainMessage_DoesNotPublishAStockRequest`,
+  `Handle_StockCommand_DoesNotPersistMessage` (`[Theory]`, asserts `Add` **and** `SaveChangesAsync` were
+  never called), `Handle_StockCommand_DoesNotBroadcastTheCommand`,
+  `Handle_StockCommand_PublishesStockQuoteRequest`,
+  `Handle_StockCommandDispatchFails_ReturnsThatFailureAndPersistsNothing`,
+  `Handle_UnknownCommand_ReturnsFailureAndPersistsNothing` (`[Theory]`),
+  `Handle_UnknownCommand_DoesNotEchoTheCommandNameBackToTheCaller`,
+  `Handle_InvalidCommand_ReturnsTheParserErrorAndPersistsNothing` (`[Theory]`),
+  `Handle_InvalidStockCommand_ReturnsTheStockCodeErrorInstance`, `Handle_UnknownRoom_ReturnsFailure`,
+  `Handle_UnknownRoom_DoesNoWorkOnAnyBranch` (`[Theory]`), `Handle_SaveFails_DoesNotNotify`,
+  `Handle_UnusableAuthor_ReturnsFailureWithoutPersistingOrNotifying` (`[Theory]`),
+  `Handle_ContentTooLongForTheDomain_ReturnsFailureWithoutPersistingOrNotifying`,
+  `Handle_DomainFactoryFails_DoesNotNotify`,
+  `Handle_PlainMessage_ForwardsTheCancellationTokenToEveryCall`,
+  `Handle_StockCommand_ForwardsTheCancellationTokenToTheDispatch`, `Handle_NullCommand_Throws`.
+- `PostMessageValidatorTests` (17): `Validate_UsableInput_IsValid` (`[Theory]`),
+  `Validate_DefaultRoomId_IsRejected`, `Validate_EmptyOrWhitespaceRawInput_IsRejected` (`[Theory]`),
+  `Validate_RawInputAboveTheCap_IsRejected`, `Validate_RawInputOnTheBoundary_IsAccepted`,
+  `Validate_MaximumLengthSurroundedByWhitespace_IsAccepted`, `Validate_EmptyAuthorUserId_IsRejected`
+  (`[Theory]`), `Validate_EmptyAuthorDisplayName_IsRejected` (`[Theory]`),
+  `MaxRawInputLength_MatchesTheDomainContentLimit`.
+- `RequestStockQuoteHandlerTests` (9): `Handle_ValidCommand_PublishesTheRequestAndSucceeds`,
+  `Handle_ValidCommand_PublishesTheParsedStockCode` (`[Theory]`),
+  `Handle_ValidCommand_CarriesTheRoomAndTheRequesterIdentity`,
+  `Handle_ValidCommand_StampsTheRequestWithTheInjectedClock`, `Handle_TwoCommands_GetDistinctRequestIds`,
+  `Handle_Always_ForwardsTheCancellationToken`, `Handle_NullCommand_Throws`,
+  `Constructor_TakesNoPersistenceDependency_SoAStockCommandCanNeverBeWritten` (reflection over the
+  constructor — the structural guarantee becomes something the build enforces).
+- `PostMessageRegistrationTests` (5): `AddApplication_RegistersTheInternalCommandHandlers`,
+  `AddApplication_RegistersTheInternalValidator`, `Send_StockCommand_ReachesTheBrokerAndWritesNothing`
+  (real composition, real pipeline, real nested dispatch — no broker, no database),
+  `Send_PlainMessage_PersistsAndNeverTouchesTheBroker`,
+  `Send_EmptyInput_IsRejectedByThePipelineAsAFailedResult`.
 
 ### [ ] 1.10 Wire the MassTransit publishers and receive endpoints
 Files: `src/Chat.Infrastructure/Messaging/*`, `src/Chat.Application/Abstractions/Messaging/*`
