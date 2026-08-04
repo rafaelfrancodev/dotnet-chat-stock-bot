@@ -29,37 +29,39 @@ Clean Architecture + DDD + CQRS-style command handlers. Two runnable processes: 
 
 ```
 src/
-  Chat.Domain/          # Entities, VOs (StockCode, MessageContent), domain events. No external deps.
-  Chat.Application/     # Features/<UseCase>/ Command|Query + Handler + Validator; interfaces for infra.
-  Chat.Infrastructure/  # EF Core + Identity, MassTransit bus + consumers, Stooq typed HttpClient.
-  Chat.Web/             # SignalR hub(s), minimal UI, health endpoints, composition root.
-  Chat.Bot/             # BackgroundService: consume stock requests -> Stooq -> publish quote; health endpoints.
+  Chat.Domain/          # Result/Error kernel; Message + ChatRoom aggregates and their VOs; ChatCommandParser. Zero deps.
+  Chat.Application/     # Abstractions/ (8 ports), Behaviors/, Contracts/ (MessageDto, wire records). Features/ from 1.8.
+  Chat.Infrastructure/  # ChatDbContext (EF Core + Identity), converters/configurations/migrations/repositories, MassTransit wiring, health checks, clock.
+  Chat.Web/             # Composition root, Razor Pages, health endpoints. Identity UI from 1.11, SignalR hub from 1.12.
+  Chat.Bot/             # Web host serving /health only today; request consumer + Stooq worker from 1.15.
 tests/
-  Chat.UnitTests/
-  Chat.IntegrationTests/
+  Chat.UnitTests/       # 209 tests: domain, port shape, EF model and the generated read SQL.
+  Chat.IntegrationTests/  # empty until 1.17.
 ```
 
-Dependency rule: Web/Bot → Infrastructure → Application → Domain. Never the other way.
+Dependency rule: Web/Bot → Infrastructure → Application → Domain. Never the other way. `AbstractionsTests` asserts the compiled `Chat.Application` assembly references no EF Core, MassTransit, ASP.NET Core or RabbitMQ.Client.
 
 Stock flow: hub → `PostMessageCommand` → parser detects `/stock=` → `RequestStockQuoteCommand` → publish `StockQuoteRequested` → Bot consumes on `stock-quote-requests` → Stooq CSV → publish `StockQuoteResolved` → Web consumes on `stock-quote-responses` → posts + broadcasts to the room as "Bot". The **command** is never written to the DB.
 
-Messaging uses **MassTransit 8 over RabbitMQ**. MassTransit owns the exchange layout (one exchange per message type) and the `_error` / `_skipped` queues; we own the receive endpoint names `stock-quote-requests` / `stock-quote-responses`, prefetch and the retry policy, all in `Chat.Application/Contracts/Messaging/MessagingConstants.cs`. `AddMessaging(configuration, registerConsumers)` configures the bus; each host passes only its own consumers. The wire contracts (`StockQuoteRequested`, `StockQuoteResolved`) are plain records in `Chat.Application/Contracts/Messaging` — no separate Contracts project, and Application takes no MassTransit dependency. Persistence is EF Core + SQL Server 2022 (database `ChatDb`, run in Docker via `docker-compose.dev.yml`), sharing one `ChatDbContext` with Identity. Bot quote answers **are** persisted (`MessageOrigin.Bot`) and then broadcast; only the `/stock=` command is never persisted. Full design: `docs/ARCHITECTURE.md`.
+Messaging uses **MassTransit 8 over RabbitMQ**. MassTransit owns the exchange layout (one exchange per message type) and the `_error` / `_skipped` queues; we own the receive endpoint names `stock-quote-requests` / `stock-quote-responses`, prefetch and the retry policy, all in `Chat.Application/Contracts/Messaging/MessagingConstants.cs`. `AddMessaging(configuration, registerConsumers)` configures the bus; each host passes only its own consumers. The wire contracts (`StockQuoteRequested`, `StockQuoteResolved`) are plain records — no separate Contracts project. Persistence is EF Core + SQL Server 2022 (database `ChatDb`, run in Docker via `docker-compose.dev.yml`), sharing one `ChatDbContext` with Identity; `20260804190713_InitialCreate` is committed and applied. Bot quote answers **are** persisted (`MessageOrigin.Bot`) and then broadcast; only the `/stock=` command is never persisted. Full design: `docs/ARCHITECTURE.md`.
 
 ## Conventions
 
 - Ubiquitous language: ChatRoom, Message, StockCommand, StockQuote, Participant.
-- Result pattern for expected failures; exceptions only for exceptional cases.
-- FluentValidation in pipeline behavior; hubs/controllers stay ~5 lines.
-- Nullable enabled; async all the way with CancellationToken; `sealed` + `record` defaults.
+- Result pattern for expected failures; exceptions only for exceptional cases (a null value object is a programmer error, not a `Result`).
+- Value objects: private constructor + static `Create` returning `Result<T>` + a nested `public static class Errors` of `Error` constants with stable `"Type.Code"` codes (`MessageContent.TooLong`).
+- Aggregates: factories only, plus a private parameterless constructor purely for EF materialisation and `private init` properties — mappings must keep EF's **default backing-field access mode**.
+- Repositories only stage (`Add`, synchronous, no I/O); `IUnitOfWork.SaveChangesAsync` commits exactly once per use case, which is what makes "this path performs no write" provable in a handler test.
+- Read paths return DTOs projected in SQL; entities never leave a repository on the query side. `MessageDto` lives in `Chat.Application/Contracts/Messages/` — three ports share it, so it is not in a feature folder.
+- Nullable enabled; async all the way with CancellationToken last; `sealed` + `record` defaults; culture-sensitive APIs banned in domain logic (`OrdinalIgnoreCase`, `ToLowerInvariant`, `InvariantCulture`).
 - Tests: xUnit + FluentAssertions; naming `Scenario_Condition_ExpectedOutcome`.
-- Constants: `LatestMessagesCount = 50`; queue names in `MessagingConstants`.
+- Constants: `LatestMessagesCount = 50`; endpoint names in `MessagingConstants`; column widths in `PersistenceConstants`.
 - Commit per completed task, imperative messages.
 - Central package management: all versions in `Directory.Packages.props`, never in a csproj.
 - Licence-pinned: MediatR stays on 12.x (Apache-2.0), FluentAssertions on 7.x, MassTransit on 8.x. Do not upgrade — the next major of each is commercially licensed.
 - LF line endings everywhere (`.editorconfig` + `.gitattributes`); `dotnet format` enforces it.
 - Primary constructors are preferred; captured parameters stay camelCase, explicit fields use `_`.
-- Requests implement `ICommand`/`ICommand<T>`/`IQuery<T>` so the `Result`-constrained pipeline behaviors apply.
-- Read paths return DTOs projected in SQL; entities never leave a repository on the query side.
+- Requests implement `ICommand`/`ICommand<T>`/`IQuery<T>` so the `Result`-constrained pipeline behaviors apply; FluentValidation runs in that pipeline and hubs/controllers stay ~5 lines.
 
 ## Commands
 
@@ -69,11 +71,10 @@ dotnet tool restore                           # once — pins dotnet-ef 10.0.10 
 docker compose -f docker-compose.dev.yml up -d   # SQL Server 2022 + RabbitMQ 4 (UI: http://localhost:15672)
 docker compose -f docker-compose.dev.yml ps      # wait for both to report (healthy)
 dotnet build                                  # 0 warnings expected (TreatWarningsAsErrors)
-dotnet test                                   # all tests
+dotnet test                                   # 209 unit tests; integration suite is still empty
 dotnet format                                 # before committing
 dotnet format --verify-no-changes             # CI-style gate
 
-# EF commands only work from task 1.7 onward, once ChatDbContext exists.
 dotnet ef migrations add <Name> -p src/Chat.Infrastructure -s src/Chat.Web
 dotnet ef database update -p src/Chat.Infrastructure -s src/Chat.Web
 dotnet run --project src/Chat.Web             # terminal 1 — http://localhost:5271
@@ -99,7 +100,7 @@ curl http://localhost:5271/health/ready       # readiness-tagged dependencies on
 curl http://localhost:5271/health/live        # process liveness, runs no dependency probe
 ```
 
-Copy `.env.example` to `.env` before `docker compose up`. The DB connection string and broker credentials come from user-secrets or `ConnectionStrings__ChatDatabase` / `RabbitMq__*` environment variables — never `appsettings.json`.
+Copy `.env.example` to `.env` before `docker compose up`. The DB connection string and broker credentials come from user-secrets or `ConnectionStrings__ChatDatabase` / `RabbitMq__*` environment variables — never `appsettings.json`. `AddPersistence` throws at startup when the connection string is missing.
 
 ```bash
 dotnet user-secrets set "ConnectionStrings:ChatDatabase" \
@@ -115,36 +116,35 @@ dotnet user-secrets set "RabbitMq:Password" "<from .env>" --project src/Chat.Bot
 
 - `/architect` — design/evolve architecture, generate `docs/PLAN.md` task list.
 - `/implement <task>` — implement a plan task with tests, quality gates, commit.
-- `/test [target]` — write/fix tests until green.
-- `/review [scope]` — standards + challenge-compliance review before committing.
-- `/commit [msg]` — format + build + test + secret scan + commit.
-- `/update-readme`, `/update-claude-md` — keep docs synced (README is a graded deliverable).
+- `/test [target]` — write/fix tests until green. `/review [scope]` — standards + challenge-compliance review.
+- `/commit [msg]` — format + build + test + secret scan + commit. `/update-readme`, `/update-claude-md` — keep docs synced (README is a graded deliverable).
 
 Agents: `architect`, `implementer`, `test-engineer`, `code-reviewer`, `docs-maintainer`. Skills in `.claude/skills/` cover clean-architecture, ddd-patterns, cqrs-command-handlers, clean-code, security, performance, unit-testing, integration-testing, docs-maintenance.
 
 ## Status
 
-- [x] Architecture designed, PLAN.md created (`docs/ARCHITECTURE.md`, `docs/PLAN.md`)
-- [x] Solution scaffolded (7 projects, build + tests + format green)
-- [ ] Mandatory features implemented
-- [ ] Bonus features (see checklist above)
-- [ ] README finalized and verified
-- [ ] Final review + delivery zip/repo (include `.git/`)
+- Authoritative task list: `docs/PLAN.md` — each done task carries its design record, and later tasks must conform to it.
+- [x] Phase 0 (0.1–0.9): solution, build/package governance, compose stack, health checks, MassTransit.
+- [x] Phase 1 domain + persistence (1.1–1.7): message/room value objects, `ChatCommandParser`, `Message` and `ChatRoom` aggregates, the eight Application ports, EF Core + Identity model and the applied `InitialCreate` migration.
+- [ ] Phase 1 features (1.8–1.18): handlers, MassTransit publishers/endpoints, Identity + auth wiring, hub, chat page, Stooq client, bot worker, integration tests, manual end-to-end run. Nothing user-facing runs yet.
+- [ ] Bonus features (see checklist above). `ApplicationUser` and the Identity tables exist from 1.7, but authentication and the UI are task 1.11 — the Identity bonus is not claimable yet.
+- [ ] README written and verified (task 3.1 — `README.md` does not exist yet).
+- [ ] Final review + delivery zip/repo (include `.git/`).
 
 ## Gotchas
 
-- Stooq returns `N/D` fields for unknown tickers — bot must answer with a friendly "not found" message, not crash.
-- Stooq ticker format is lowercase with market suffix (`aapl.us`); normalize and validate (`^[a-z0-9.\-]{1,20}$`) before building the URL.
-- RabbitMQ may not be ready when apps start locally — use resilient connection/retry on startup.
+- Stooq returns `N/D` fields for unknown tickers — the bot must answer with a friendly "not found" message, not crash. Never build the Stooq URL from raw input: `StockCode.Create` already normalises to lower case and enforces `^[a-z0-9.\-]{1,20}$` (anchored `\A`/`\z`, because in .NET `$` also matches before a trailing newline).
 - Reviewers will open 2 browsers with 2 users: broadcast via SignalR groups per room, identity from claims (never from client payload).
-- `TreatWarningsAsErrors` + `EnforceCodeStyleInBuild` are on: unused usings and style violations fail the build. `GenerateDocumentationFile=true` is required for IDE0005 to fire; `CS1591` is suppressed.
-- `MSSQL_SA_PASSWORD` is baked into the SQL Server volume on first start; changing it in `.env` later needs `docker compose -f docker-compose.dev.yml down -v`. It must satisfy SQL Server's complexity policy (8+ chars, upper/lower/digit/symbol) or the container exits at boot.
-- SQL Server needs ~30 s on first start. The compose healthcheck covers it, and `AddPersistence` uses `EnableRetryOnFailure` so `dotnet run` does not race the container.
+- `Messages` deliberately has **no foreign key at all**. The bot's author id `system:bot` is not an Identity user, so an FK to `AspNetUsers` would reject every quote answer the challenge requires; `ChatRoomId` is validated with `ExistsAsync` instead.
+- EF Core cannot translate member access on a value-converted type (`message.Content.Value`), so the "last 50" query projects raw columns into `MessageRepository.LatestMessageRow` and one in-memory loop reverses and unwraps them. Do not "simplify" it back into a `MessageDto` projection.
+- `TreatWarningsAsErrors` + `EnforceCodeStyleInBuild` are on: unused usings and style violations fail the build (`GenerateDocumentationFile=true` makes IDE0005 fire; `CS1591` is suppressed). The test projects already declare `Xunit` and `FluentAssertions` as global usings, so adding those `using` lines to a test file fails with IDE0005.
+- Generated migrations are declared `generated_code = true` in a folder-scoped `.editorconfig` section — `dotnet ef` emits block-scoped namespaces and an unused `using System;`, which would otherwise fail the build. Nothing else is relaxed.
+- `dotnet build` can report 0 warnings while `dotnet format --verify-no-changes` still fails on whitespace and layout (measured). Run `dotnet format` before every commit, not just the build.
+- `MSSQL_SA_PASSWORD` is baked into the SQL Server volume on first start; changing it in `.env` later needs `docker compose -f docker-compose.dev.yml down -v`, and it must satisfy SQL Server's complexity policy or the container exits at boot. First start takes ~30 s; the compose healthcheck covers it and `AddPersistence` uses `EnableRetryOnFailure` so `dotnet run` does not race the container.
 - Connection strings must carry `TrustServerCertificate=True` locally — the container uses a self-signed certificate and Microsoft.Data.SqlClient 4+ encrypts by default.
 - `dotnet test` prints "No test is available" for `Chat.IntegrationTests` until task 1.17 lands; exit code is still 0.
 - `Chat.Bot` must never call `AddPersistence()` — that is the structural guarantee it stays decoupled from the database. It is a `Microsoft.NET.Sdk.Web` host purely so it can serve `/health`; it exposes no chat surface.
-- `InvariantGlobalization` must stay `false`. `Microsoft.Data.SqlClient` throws "Globalization Invariant Mode is not supported" at connection time, so EF Core and the SQL health check both fail under it. Use `CultureInfo.InvariantCulture` explicitly in parsing/formatting code instead.
+- `InvariantGlobalization` must stay `false`. `Microsoft.Data.SqlClient` throws "Globalization Invariant Mode is not supported" at connection time, so EF Core and the SQL health check both fail under it.
 - Use `127.0.0.1`, never `localhost`, in connection strings and broker host names. The compose file publishes on IPv4 loopback only, but `localhost` resolves to `::1` first on Windows — SqlClient then burns its full 15 s timeout before failing.
-- Health checks are registered in `Chat.Infrastructure/HealthChecks` and mapped by `MapChatHealthChecks()`. Stooq is tagged `external` and deliberately excluded from `/health/ready` — a third-party outage must not mark the bot unready.
-- MassTransit's `masstransit-bus` health check reports **bus lifecycle state, not broker reachability**: measured staying `Healthy` through a 60 s broker outage because a bus with no receive endpoints never opens a connection. That is why `RabbitMqHealthCheck` still exists. Re-measure in task 1.10 once receive endpoints are registered, and delete ours if the bus check then detects the outage.
-- Do not hand-declare exchanges, routing keys or dead-letter queues — MassTransit owns exchange layout and creates `<queue>_error` / `<queue>_skipped` itself.
+- Health checks live in `Chat.Infrastructure/HealthChecks` and are mapped by `MapChatHealthChecks()`. Stooq is tagged `external` and excluded from `/health/ready` — a third-party outage must not mark the bot unready.
+- MassTransit's `masstransit-bus` check reports **bus lifecycle state, not broker reachability**: measured staying `Healthy` through a 60 s broker outage because a bus with no receive endpoints never connects. That is why `RabbitMqHealthCheck` still exists; re-measure in task 1.10 and delete ours if the bus check then detects the outage.
