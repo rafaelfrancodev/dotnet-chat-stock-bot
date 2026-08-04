@@ -204,39 +204,68 @@ Types: `StockQuoteRequested`, `StockQuoteResolved`, `StockQuoteOutcome`, `Messag
 
 ## 4. Messaging topology
 
-All names are declared once, in `Chat.Application/Contracts/Messaging/MessagingConstants.cs`.
+**Decision: MassTransit 8 over RabbitMQ**, rather than the raw `RabbitMQ.Client` API.
+
+Queue names and tuning live once in `Chat.Application/Contracts/Messaging/MessagingConstants.cs`.
+Exchange layout is MassTransit's, not ours — see "What MassTransit owns" below.
 
 ```
-                       exchange: chat.stock (direct, durable)
-Chat.Web ──publish──▶ [rk: stock.quote.request ] ──▶ queue: stock.quote.requests  ──consume──▶ Chat.Bot
-Chat.Web ◀──consume── queue: stock.quote.responses ◀── [rk: stock.quote.response] ◀──publish── Chat.Bot
+Chat.Web ──Publish<StockQuoteRequested>──▶ exchange (message type)
+                                              └─▶ queue: stock-quote-requests ──▶ Chat.Bot
+                                                        └─ stock-quote-requests_error   (poison)
+                                                        └─ stock-quote-requests_skipped (no consumer)
 
-                       exchange: chat.stock.dlx (direct, durable)
-                       ├─ stock.quote.requests.dlq
-                       └─ stock.quote.responses.dlq
+Chat.Bot ──Publish<StockQuoteResolved>───▶ exchange (message type)
+                                              └─▶ queue: stock-quote-responses ─▶ Chat.Web
+                                                        └─ stock-quote-responses_error
+                                                        └─ stock-quote-responses_skipped
 ```
+
+### Why MassTransit
+
+| Concern | Hand-rolled `RabbitMQ.Client` | With MassTransit |
+| --- | --- | --- |
+| Connection/channel lifetime | We write the singleton connection, channel-per-consumer and recovery loop | Managed by the bus, including reconnect |
+| Topology | We declare exchanges, queues, bindings and a DLX by hand | Declared from the consumer registrations |
+| Poison messages | Manual `BasicNack(requeue:false)` + hand-built DLX | `_error` queue, automatic |
+| Retry | Hand-written | `UseMessageRetry` policy, declarative |
+| Serialization | We configure `System.Text.Json` and content types | Built in, with headers and message-type metadata |
+| Consumer plumbing | `AsyncEventingBasicConsumer` + manual ack per consumer | `IConsumer<T>` with ack/nack handled |
+| Health | We write a probe that opens a connection per call | `masstransit-bus` check, no extra connection |
+| Testing | Fakes for our own publisher interfaces | `ITestHarness` in-memory, no broker needed for tests |
+
+The cost is a framework dependency and its conventions; the benefit is that the error handling,
+retry and recovery code most likely to be subtly wrong is no longer ours to get wrong.
+
+### What MassTransit owns vs. what we configure
+
+**MassTransit owns:** exchange naming (one per message type), exchange-to-queue bindings, message
+envelope and headers, `_error` / `_skipped` queues, ack/nack, and connection recovery. This is why no
+exchange or routing-key constants remain in `MessagingConstants` — inventing our own would fight the
+transport rather than configure it.
+
+**We configure:**
 
 | Setting | Value | Rationale |
 | --- | --- | --- |
-| Exchange type | `direct` | Two routing keys, no wildcards needed. `topic` would be speculative generality |
-| Exchange/queue durability | durable, non-exclusive, non-auto-delete | Survives a broker restart during a demo |
-| Message persistence | `Persistent = true` | A quote request must not vanish if the broker restarts |
-| Prefetch (QoS) | `10` per consumer channel (`MessagingConstants.PrefetchCount`) | Bounded in-flight work; work is I/O-bound and cheap to redo |
-| Ack mode | manual `BasicAckAsync` after successful handling | No message loss on crash |
-| Failure handling | `BasicNackAsync(requeue: false)` -> dead-letter | Poison messages go to the DLQ instead of spinning forever (an infinite requeue loop is exactly "consuming too many resources") |
-| Retry | Transient Stooq faults are retried **inside** the bot by the resilience handler, not by requeueing | Keeps broker traffic flat |
-| Serialization | `System.Text.Json`, camelCase, enums as strings, `ContentType = application/json` | Readable in the RabbitMQ management UI, forward-compatible |
-| Connection | **one** `IConnection` per process (singleton), one `IChannel` per consumer/publisher | The performance skill's hard rule; never connect per message |
-| Topology declaration | idempotent `ExchangeDeclare`/`QueueDeclare`/`QueueBind` on startup, by both processes | Either process can be started first |
-| Startup resilience | connection factory with `AutomaticRecoveryEnabled` + bounded retry loop on first connect | RabbitMQ container is often not ready yet locally |
+| Endpoint names | `stock-quote-requests`, `stock-quote-responses` (`MessagingConstants`) | Explicit and readable in the management UI rather than convention-derived |
+| Endpoint formatter | `SetKebabCaseEndpointNameFormatter()` | Any convention-named endpoint matches the ones we name by hand |
+| Prefetch | `10` (`MessagingConstants.PrefetchCount`) | Bounded in-flight work; work is I/O-bound against a third party |
+| Retry | `Interval(3, 2s)` | Rides out a brief Stooq blip; then the message moves to `_error` instead of looping |
+| Durability | MassTransit defaults: durable queues, persistent messages | Survives a broker restart mid-demo |
+| Consumer registration | Passed per host into `AddMessaging(...)` | Chat.Web registers only the response consumer, Chat.Bot only the request consumer — neither learns the other's endpoint |
+
+Transient Stooq faults are still retried **inside** the bot by the HTTP resilience handler, before the
+message-level retry ever engages. That keeps broker traffic flat.
 
 ### Scale-out note (documented, not implemented)
 
-`stock.quote.responses` is a single shared queue. With more than one `Chat.Web` instance, only the instance
-that consumed the message would broadcast, and users connected to the other instance would see nothing.
-The correct fix is a fanout exchange with a per-instance exclusive auto-delete queue **plus** a SignalR
-backplane (Redis / Azure SignalR). Out of scope for a single-instance deliverable, but called out so the
-reviewer knows it is a conscious decision rather than an oversight.
+`stock-quote-responses` is a single shared queue, so with more than one `Chat.Web` instance only the
+instance that consumed the message would broadcast, and users on the other instance would see nothing.
+The MassTransit-native fix is straightforward — mark the response consumer's endpoint temporary so each
+instance gets its own auto-delete queue bound to the same exchange — but it still needs a SignalR
+backplane (Redis / Azure SignalR) to be correct. Out of scope for a single-instance deliverable, called
+out so the reviewer knows it is a conscious decision rather than an oversight.
 
 ---
 
@@ -258,14 +287,14 @@ Browser                Chat.Web                        RabbitMQ                 
    │      Message.PostByParticipant   RequestStockQuoteCommand
    │      repo.Add + SaveChanges      (NO repository injected)
    │      IChatNotifier.Broadcast          │ IStockQuoteRequester.RequestAsync
-   │                                       ├──── stock.quote.request ────▶ stock.quote.requests
+   │                                       ├── Publish<StockQuoteRequested> ─▶ stock-quote-requests
    │                                                                              │
    │                                                                    ResolveStockQuoteHandler
    │                                                                              ├── GET /q/l/?s=aapl.us&f=sd2t2ohlcv&h&e=csv ──▶
    │                                                                              │◀── Symbol,Date,Time,Open,High,Low,Close,Volume
    │                                                                              │    AAPL.US,2026-08-03,21:00:00,...,93.42,...
    │                                                                    format "AAPL.US quote is $93.42 per share"
-   │                                       ◀──── stock.quote.response ─── IStockQuoteResponder
+   │                    stock-quote-responses ◀── Publish<StockQuoteResolved> ── IStockQuoteResponder
    │                        StockQuoteResponseConsumer (Chat.Web)
    │                        │ PostBotMessageCommand
    │                        ▼
@@ -394,8 +423,19 @@ Both hosts expose the same three routes, mapped from one definition
 
 | Host | Dependencies probed |
 | --- | --- |
-| `Chat.Web` | `sql-server` (`SELECT 1`), `rabbitmq` (open a connection) |
-| `Chat.Bot` | `rabbitmq`, `stooq` (probe the service root) |
+| `Chat.Web` | `sql-server` (`SELECT 1`), `rabbitmq` (open a connection), `masstransit-bus` |
+| `Chat.Bot` | `rabbitmq`, `stooq` (probe the service root), `masstransit-bus` |
+
+### Why there are two broker checks
+
+`masstransit-bus` is registered automatically by `AddMassTransit`. It reports **bus lifecycle state, not
+broker reachability**. Measured with the broker stopped for 60 s: it stayed `Healthy` throughout and the
+bus logged no connection attempt, because a bus with no receive endpoints registered never opens one.
+Our `rabbitmq` check went `Unhealthy` immediately and correctly drove `/health/ready` to 503.
+
+Both are therefore kept for now. Task 1.10 registers the real receive endpoints and must re-measure: if
+a stopped broker then turns `masstransit-bus` unhealthy, `RabbitMqHealthCheck` should be deleted, since
+the bus check costs nothing while ours opens a short-lived connection per probe.
 
 Design decisions:
 
@@ -415,9 +455,12 @@ Design decisions:
 - A missing connection string is *reported* as unhealthy with an actionable message rather than thrown
   at startup, so a misconfigured host explains itself instead of crash-looping.
 
-Written by hand rather than pulled from `AspNetCore.HealthChecks.*`: the three probes are ~30 lines
-each, `SqlClient`/`RabbitMQ.Client`/`HttpClient` are already in the dependency graph, and it avoids
-another third-party licence and version to track.
+Written by hand rather than pulled from `AspNetCore.HealthChecks.*`: the probes are ~30 lines each,
+`SqlClient`/`RabbitMQ.Client`/`HttpClient` are already in the dependency graph, and it avoids another
+third-party licence and version to track.
+
+Verified behaviour (both hosts): all dependencies up → 200; broker stopped → `/health/ready` 503 while
+`/health/live` stays 200; broker restarted → back to 200 without restarting either host.
 
 ---
 
@@ -435,6 +478,9 @@ another third-party licence and version to track.
 | Bot answers persisted | broadcast-only | "The post owner should be the bot" implies a post; survives a page refresh |
 | Razor Pages + Identity default UI + vanilla JS | SPA | The challenge explicitly says frontend as simple as possible |
 | Classic `.sln` | `.slnx` | Broadest tool compatibility for whoever opens the deliverable |
+| MassTransit 8 over RabbitMQ | raw `RabbitMQ.Client` | Connection lifetime, topology, retry, `_error` queues and consumer plumbing are the code most likely to be subtly wrong; MassTransit also gives `ITestHarness` so messaging is unit-testable without a broker |
+| MassTransit pinned to 8.5.10 | 9.x | 9.0 moved to a commercial licence (Massient, Inc.); 8.5.10 is the last Apache-2.0 release and has a native `net10.0` target |
+| Keeping our `rabbitmq` probe alongside `masstransit-bus` | bus check alone | Measured: the bus check stays healthy through a broker outage until receive endpoints exist. Removal trigger recorded in task 1.10 |
 | Hand-written health checks | `AspNetCore.HealthChecks.*` packages | ~30 lines each against clients already in the graph; no extra licence, version or advisory surface |
 | `FrameworkReference Microsoft.AspNetCore.App` in Infrastructure | duplicating the endpoint mapping in both hosts | One definition of the health routes and payload; the dependency rule is about direction, and nothing here is visible to Application or Domain |
 | `InvariantGlobalization=false` | the template default `true` | `Microsoft.Data.SqlClient` refuses to connect under invariant mode; parsing still pins `InvariantCulture` explicitly |

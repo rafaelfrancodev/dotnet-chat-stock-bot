@@ -9,9 +9,15 @@ namespace Chat.Infrastructure.HealthChecks;
 /// Verifies the broker is reachable and the configured credentials and virtual host are accepted.
 /// </summary>
 /// <remarks>
-/// Opens a short-lived connection per probe. Once task 1.10 introduces the shared singleton
-/// <see cref="IConnection"/>, this check should resolve that connection and report
-/// <c>IsOpen</c> instead, so probing costs nothing.
+/// This probe exists *alongside* MassTransit's own <c>masstransit-bus</c> check because that check
+/// reports bus lifecycle state, not connectivity. Measured with the broker stopped: the bus check
+/// stayed <c>Healthy</c> indefinitely and logged no connection attempt, because a bus with no receive
+/// endpoints registered never opens one. Until consumers exist it is not a dependency probe at all.
+/// <para>
+/// Task 1.10 should re-measure once the receive endpoints are registered: if a stopped broker then
+/// turns <c>masstransit-bus</c> unhealthy, delete this class and its registration, because the bus
+/// check costs nothing while this one opens a short-lived connection per probe.
+/// </para>
 /// </remarks>
 internal sealed class RabbitMqHealthCheck(IOptions<RabbitMqOptions> options) : IHealthCheck
 {

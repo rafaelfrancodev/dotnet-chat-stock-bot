@@ -31,7 +31,7 @@ Clean Architecture + DDD + CQRS-style command handlers. Two runnable processes: 
 src/
   Chat.Domain/          # Entities, VOs (StockCode, MessageContent), domain events. No external deps.
   Chat.Application/     # Features/<UseCase>/ Command|Query + Handler + Validator; interfaces for infra.
-  Chat.Infrastructure/  # EF Core + Identity, RabbitMQ publisher/consumer, Stooq typed HttpClient.
+  Chat.Infrastructure/  # EF Core + Identity, MassTransit bus + consumers, Stooq typed HttpClient.
   Chat.Web/             # SignalR hub(s), minimal UI, health endpoints, composition root.
   Chat.Bot/             # BackgroundService: consume stock requests -> Stooq -> publish quote; health endpoints.
 tests/
@@ -41,9 +41,9 @@ tests/
 
 Dependency rule: Web/Bot → Infrastructure → Application → Domain. Never the other way.
 
-Stock flow: hub → `PostMessageCommand` → parser detects `/stock=` → `RequestStockQuoteCommand` → publish to `stock.quote.requests` queue → Bot consumes → Stooq CSV → publish to `stock.quote.responses` → Web consumer posts + broadcasts to the room as "Bot". The **command** is never written to the DB.
+Stock flow: hub → `PostMessageCommand` → parser detects `/stock=` → `RequestStockQuoteCommand` → publish `StockQuoteRequested` → Bot consumes on `stock-quote-requests` → Stooq CSV → publish `StockQuoteResolved` → Web consumes on `stock-quote-responses` → posts + broadcasts to the room as "Bot". The **command** is never written to the DB.
 
-Messaging topology: durable direct exchange `chat.stock` (+ DLX `chat.stock.dlx`), queues `stock.quote.requests` / `stock.quote.responses` with dead-letter queues; all names in `Chat.Application/Contracts/Messaging/MessagingConstants.cs`. The wire contracts (`StockQuoteRequested`, `StockQuoteResolved`) live in `Chat.Application/Contracts/Messaging` — no separate Contracts project. Persistence is EF Core + SQL Server 2022 (database `ChatDb`, run in Docker via `docker-compose.dev.yml`), sharing one `ChatDbContext` with Identity. Bot quote answers **are** persisted (`MessageOrigin.Bot`) and then broadcast; only the `/stock=` command is never persisted. Full design: `docs/ARCHITECTURE.md`.
+Messaging uses **MassTransit 8 over RabbitMQ**. MassTransit owns the exchange layout (one exchange per message type) and the `_error` / `_skipped` queues; we own the receive endpoint names `stock-quote-requests` / `stock-quote-responses`, prefetch and the retry policy, all in `Chat.Application/Contracts/Messaging/MessagingConstants.cs`. `AddMessaging(configuration, registerConsumers)` configures the bus; each host passes only its own consumers. The wire contracts (`StockQuoteRequested`, `StockQuoteResolved`) are plain records in `Chat.Application/Contracts/Messaging` — no separate Contracts project, and Application takes no MassTransit dependency. Persistence is EF Core + SQL Server 2022 (database `ChatDb`, run in Docker via `docker-compose.dev.yml`), sharing one `ChatDbContext` with Identity. Bot quote answers **are** persisted (`MessageOrigin.Bot`) and then broadcast; only the `/stock=` command is never persisted. Full design: `docs/ARCHITECTURE.md`.
 
 ## Conventions
 
@@ -55,7 +55,7 @@ Messaging topology: durable direct exchange `chat.stock` (+ DLX `chat.stock.dlx`
 - Constants: `LatestMessagesCount = 50`; queue names in `MessagingConstants`.
 - Commit per completed task, imperative messages.
 - Central package management: all versions in `Directory.Packages.props`, never in a csproj.
-- Licence-pinned: MediatR stays on 12.x (Apache-2.0), FluentAssertions on 7.x. Do not upgrade.
+- Licence-pinned: MediatR stays on 12.x (Apache-2.0), FluentAssertions on 7.x, MassTransit on 8.x. Do not upgrade — the next major of each is commercially licensed.
 - LF line endings everywhere (`.editorconfig` + `.gitattributes`); `dotnet format` enforces it.
 - Primary constructors are preferred; captured parameters stay camelCase, explicit fields use `_`.
 - Requests implement `ICommand`/`ICommand<T>`/`IQuery<T>` so the `Result`-constrained pipeline behaviors apply.
@@ -93,8 +93,8 @@ instead of setting a single startup project.
 **Health endpoints** — both hosts expose the same three routes:
 
 ```bash
-curl http://localhost:5271/health             # Chat.Web: sql-server + rabbitmq (JSON, 200/503)
-curl http://localhost:5299/health             # Chat.Bot: rabbitmq + stooq
+curl http://localhost:5271/health             # Chat.Web: sql-server + rabbitmq + masstransit-bus
+curl http://localhost:5299/health             # Chat.Bot: rabbitmq + stooq + masstransit-bus
 curl http://localhost:5271/health/ready       # readiness-tagged dependencies only
 curl http://localhost:5271/health/live        # process liveness, runs no dependency probe
 ```
@@ -146,3 +146,5 @@ Agents: `architect`, `implementer`, `test-engineer`, `code-reviewer`, `docs-main
 - `InvariantGlobalization` must stay `false`. `Microsoft.Data.SqlClient` throws "Globalization Invariant Mode is not supported" at connection time, so EF Core and the SQL health check both fail under it. Use `CultureInfo.InvariantCulture` explicitly in parsing/formatting code instead.
 - Use `127.0.0.1`, never `localhost`, in connection strings and broker host names. The compose file publishes on IPv4 loopback only, but `localhost` resolves to `::1` first on Windows — SqlClient then burns its full 15 s timeout before failing.
 - Health checks are registered in `Chat.Infrastructure/HealthChecks` and mapped by `MapChatHealthChecks()`. Stooq is tagged `external` and deliberately excluded from `/health/ready` — a third-party outage must not mark the bot unready.
+- MassTransit's `masstransit-bus` health check reports **bus lifecycle state, not broker reachability**: measured staying `Healthy` through a 60 s broker outage because a bus with no receive endpoints never opens a connection. That is why `RabbitMqHealthCheck` still exists. Re-measure in task 1.10 once receive endpoints are registered, and delete ours if the bus check then detects the outage.
+- Do not hand-declare exchanges, routing keys or dead-letter queues — MassTransit owns exchange layout and creates `<queue>_error` / `<queue>_skipped` itself.

@@ -9,6 +9,8 @@ builder.Services.AddApplication();
 builder.Services.AddPersistence(builder.Configuration);
 builder.Services.AddMessaging(builder.Configuration);
 
+// MassTransit contributes its own "masstransit-bus" check via AddMessaging; AddChatBroker is what
+// actually detects a broker outage today. See RabbitMqHealthCheck for why both exist.
 builder.Services.AddHealthChecks()
     .AddChatDatabase(builder.Configuration)
     .AddChatBroker(builder.Configuration);

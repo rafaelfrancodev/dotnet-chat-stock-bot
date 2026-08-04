@@ -44,7 +44,14 @@ public static class HealthCheckBuilderExtensions
             [HealthCheckNames.ReadyTag]);
     }
 
-    /// <summary>Probes the RabbitMQ broker. Gates readiness — without it no stock quote can flow.</summary>
+    /// <summary>
+    /// Probes the RabbitMQ broker directly. Gates readiness — without it no stock quote can flow.
+    /// </summary>
+    /// <remarks>
+    /// Complements, rather than duplicates, MassTransit's <c>masstransit-bus</c> check: that one
+    /// reports bus lifecycle state and stays healthy while the broker is down until receive endpoints
+    /// exist. See <see cref="RabbitMqHealthCheck"/> for the measurement and the removal trigger.
+    /// </remarks>
     public static IHealthChecksBuilder AddChatBroker(
         this IHealthChecksBuilder builder,
         IConfiguration configuration)

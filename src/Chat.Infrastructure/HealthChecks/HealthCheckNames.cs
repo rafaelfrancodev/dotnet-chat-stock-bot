@@ -9,8 +9,16 @@ public static class HealthCheckNames
     /// <summary>The relational store behind chat history and Identity.</summary>
     public const string SqlServer = "sql-server";
 
-    /// <summary>The message broker carrying stock quote requests and responses.</summary>
+    /// <summary>Direct broker connectivity probe. See <c>RabbitMqHealthCheck</c>.</summary>
     public const string RabbitMq = "rabbitmq";
+
+    /// <summary>
+    /// Bus lifecycle state. Registered and named by MassTransit itself when the bus is added, not by
+    /// us — declared here only so the name has one documented home. It already carries the
+    /// <see cref="ReadyTag"/> tag, so it appears in <c>/health/ready</c> automatically.
+    /// Note it reports readiness of the bus, not reachability of the broker.
+    /// </summary>
+    public const string MassTransitBus = "masstransit-bus";
 
     /// <summary>The third-party quote provider the bot calls.</summary>
     public const string Stooq = "stooq";

@@ -27,6 +27,11 @@
     <PackageVersion Include="Microsoft.Extensions.Http.Resilience" Version="10.8.0" />
     <PackageVersion Include="Microsoft.Extensions.Hosting.Abstractions" Version="10.0.10" />
     <PackageVersion Include="Microsoft.Extensions.Options.ConfigurationExtensions" Version="10.0.10" />
+    <!-- MassTransit is pinned to the 8.x line: it is the last Apache-2.0 release. 9.x moved to a
+         commercial licence (Massient, Inc.), which we cannot accept for this deliverable. -->
+    <PackageVersion Include="MassTransit" Version="8.5.10" />
+    <PackageVersion Include="MassTransit.RabbitMQ" Version="8.5.10" />
+    <!-- Pulled in by MassTransit.RabbitMQ; pinned transitively to the latest patch. -->
     <PackageVersion Include="RabbitMQ.Client" Version="7.2.1" />
   </ItemGroup>
 

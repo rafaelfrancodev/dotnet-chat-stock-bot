@@ -47,15 +47,15 @@ Files: `src/Chat.Application/Abstractions/Messaging/*`, `src/Chat.Application/Be
 
 ### [x] 0.6 Define the messaging contracts and topology names
 Files: `src/Chat.Application/Contracts/Messaging/*`
-- `MessagingConstants` (exchange `chat.stock`, DLX `chat.stock.dlx`, queues `stock.quote.requests` / `stock.quote.responses` + DLQs, routing keys, prefetch, content type).
-- `StockQuoteRequested`, `StockQuoteResolved`, `StockQuoteOutcome`.
+- `MessagingConstants` (receive endpoints `stock-quote-requests` / `stock-quote-responses`, prefetch, retry policy, MassTransit's `_error` / `_skipped` suffixes).
+- `StockQuoteRequested`, `StockQuoteResolved`, `StockQuoteOutcome` — plain records, so `Chat.Application` takes no MassTransit dependency.
 
 ### [x] 0.7 Write the architecture and plan documents
 Files: `docs/ARCHITECTURE.md`, `docs/PLAN.md`
 
 ### [x] 0.8 Add dependency health checks and a combined dev run
 Files: `src/Chat.Infrastructure/HealthChecks/*`, `src/Chat.Infrastructure/Messaging/RabbitMqOptions.cs`, `src/Chat.Infrastructure/Stocks/StooqOptions.cs`, `src/Chat.Web/Program.cs`, `src/Chat.Bot/*`, `Chat.slnLaunch`, `scripts/run-dev.ps1`
-- `SqlServerHealthCheck` (`SELECT 1`), `RabbitMqHealthCheck` (open a connection), `StooqHealthCheck` (probe the service root). Hand-written, no extra NuGet dependency.
+- `SqlServerHealthCheck` (`SELECT 1`), `RabbitMqHealthCheck` (open a connection), `StooqHealthCheck` (probe the service root). Hand-written, no extra NuGet dependency. MassTransit adds `masstransit-bus` on top.
 - `MapChatHealthChecks()` maps `/health`, `/health/ready` and `/health/live` identically in both hosts; shared JSON payload via `HealthReportSerializer`.
 - Stooq is tagged `external` and reports `Degraded`, so a Stooq outage never makes the bot unready.
 - `/health/live` runs no dependency probe — a broker outage must not trigger a process restart.
@@ -63,7 +63,15 @@ Files: `src/Chat.Infrastructure/HealthChecks/*`, `src/Chat.Infrastructure/Messag
 - `Chat.slnLaunch` gives Visual Studio a "Chat.Web + Chat.Bot" startup profile; `scripts/run-dev.ps1` does the same from the CLI.
 - **Verified:** with the compose stack up, Chat.Web reports `sql-server` + `rabbitmq` healthy (200) and Chat.Bot reports `rabbitmq` + `stooq` healthy (200); stopping the broker turns `/health/ready` into 503 while `/health/live` stays 200.
 - Fixed two real defects found by running it: `InvariantGlobalization=true` broke `Microsoft.Data.SqlClient`, and `localhost` resolved to `::1` against IPv4-only published ports.
-- Follow-up for 1.10: switch `RabbitMqHealthCheck` to the shared singleton connection instead of opening one per probe.
+
+### [x] 0.9 Replace raw RabbitMQ.Client with MassTransit
+Files: `Directory.Packages.props`, `src/Chat.Infrastructure/{DependencyInjection.cs,Chat.Infrastructure.csproj}`, `src/Chat.Application/Contracts/Messaging/MessagingConstants.cs`, `src/Chat.{Web,Bot}/Program.cs`, `docs/*`
+- MassTransit pinned to **8.5.10** — the last Apache-2.0 release, with a native `net10.0` target. 9.x moved to a commercial licence (Massient, Inc.), same reasoning as the MediatR and FluentAssertions pins.
+- `AddMessaging(configuration, registerConsumers)` configures the bus over RabbitMQ: kebab-case endpoint formatter, prefetch and retry from `MessagingConstants`, host-specific consumer registration passed in by each host.
+- `MessagingConstants` drops the exchange/routing-key/DLX names — MassTransit owns exchange layout and `_error` / `_skipped` queues — and keeps endpoint names, prefetch and the retry policy.
+- Wire contracts remain plain records; `Chat.Application` still has no messaging framework dependency.
+- **Measured:** with the broker stopped, MassTransit's `masstransit-bus` check stays `Healthy` for 60 s+ and logs no connection attempt, because a bus with no receive endpoints never opens one. `RabbitMqHealthCheck` is therefore kept alongside it; removal trigger recorded in task 1.10.
+- **Verified:** both hosts healthy (200) with everything up; broker stopped → `/health/ready` 503 and `/health/live` 200 on both; broker restarted → both back to 200 without a restart.
 
 ---
 
@@ -148,16 +156,15 @@ Unit tests (highest-value tests in the repo):
 - `Handle_UnknownCommand_ReturnsFailureAndPersistsNothing`
 - `Handle_UnknownRoom_ReturnsFailure`
 
-### [ ] 1.10 Add the RabbitMQ infrastructure
-Files: `src/Chat.Infrastructure/Messaging/{RabbitMqOptions,RabbitMqConnectionProvider,RabbitMqTopology,StockQuoteRequestPublisher,StockQuoteResponsePublisher,RabbitMqConsumerBase}.cs`
+### [ ] 1.10 Wire the MassTransit publishers and receive endpoints
+Files: `src/Chat.Infrastructure/Messaging/*`, `src/Chat.Application/Abstractions/Messaging/*`
 Acceptance:
-- One singleton `IConnection` per process with automatic recovery and a bounded startup retry loop.
-- Topology declared idempotently from `MessagingConstants`, including the DLX and both DLQs.
-- Publishers set `Persistent = true` and `ContentType = application/json`.
-- Consumer base: prefetch `MessagingConstants.PrefetchCount`, manual ack, `BasicNack(requeue:false)` on unprocessable payloads, honours `stoppingToken`.
-- `RabbitMqHealthCheck` switches from opening a per-probe connection to reporting `IsOpen` on the shared singleton connection.
-- `AddMessaging` binds `RabbitMqOptions` from configuration; no credentials in `appsettings.json`.
-Unit tests: `Serializer_RoundTrip_PreservesContract` for both contracts; `Topology_Declaration_UsesMessagingConstants` (assert the declared names come from the constants class).
+- `IStockQuoteRequester` / `IStockQuoteResponder` implemented over `IPublishEndpoint`, so Application still depends on its own abstractions and never on MassTransit.
+- Receive endpoints named from `MessagingConstants` (`stock-quote-requests`, `stock-quote-responses`); each host passes only its own consumers into `AddMessaging(...)`.
+- Retry policy `Interval(RetryLimit, RetryIntervalSeconds)`; exhausted messages land in `<queue>_error`, never requeue forever.
+- Credentials come from user-secrets/env, never `appsettings.json`.
+- **Re-measure the broker health checks now that receive endpoints exist:** stop RabbitMQ and confirm `masstransit-bus` reports unhealthy. If it does, delete `RabbitMqHealthCheck` + `AddChatBroker` and rely on the bus check alone (it costs nothing; ours opens a connection per probe). If it does not, keep ours and record the measurement.
+Unit tests: `Serializer_RoundTrip_PreservesContract` for both contracts; publisher tests using MassTransit's `ITestHarness` in-memory transport (`Publish_StockQuoteRequested_IsSentToBus`) — no broker required.
 
 ### [ ] 1.11 Add Identity, authentication and the seeded default room to Chat.Web
 Files: `src/Chat.Web/Program.cs`, `src/Chat.Web/Areas/Identity/*`, `src/Chat.Infrastructure/Persistence/ChatDbSeeder.cs`
