@@ -114,12 +114,30 @@ Acceptance:
 Unit tests (`tests/Chat.UnitTests/Domain/StockCommands/ChatCommandParserTests.cs`):
 - `Parse_StockCommand_ReturnsStockQuote`, `Parse_UpperCaseStockCommand_ReturnsStockQuote`, `Parse_StockCommandWithoutCode_ReturnsInvalid`, `Parse_UnknownSlashCommand_ReturnsUnknownCommand`, `Parse_PlainText_ReturnsPlainMessage`, `Parse_GarbageInput_DoesNotThrow` (`[Theory]`).
 
-### [ ] 1.4 Model the Message aggregate
+### [x] 1.4 Model the Message aggregate
 Files: `src/Chat.Domain/Messages/{Message.cs,MessagePosted.cs}`
 Acceptance:
 - `Message.PostByParticipant(...)` and `Message.PostByBot(...)` are the only ways to create a message; constructor is private.
 - Both raise `MessagePosted`; `Origin` is set correctly; `ChatRoomId` is stored by id (no navigation property).
-Unit tests: `PostByParticipant_ValidInput_RaisesMessagePosted`, `PostByBot_ValidInput_SetsBotAuthorAndOrigin`.
+- Factories return `Result<Message>` because three invariants can still fail once the value objects are
+  valid: a `default` `ChatRoomId` (a struct, so an orphan post is representable), a `default`
+  `PostedAtUtc` (it is the ordering key of the "last 50" query), and `MessageAuthor.Bot` passed to
+  `PostByParticipant` (`Origin` and `Author` must agree). Null value objects are a programmer error, not
+  an expected failure, so they throw `ArgumentNullException`.
+- `PostByBot` takes no author: it uses `MessageAuthor.Bot` directly, so "the post owner is the bot" is
+  structurally guaranteed rather than left to the caller.
+- No clock in the domain: `postedAtUtc` is a `DateTimeOffset` parameter (task 1.6's `IDateTimeProvider`),
+  normalised with `ToUniversalTime()` so the ordering key cannot drift with the caller's offset.
+- `MessagePosted(MessageId, ChatRoomId, MessageAuthor, MessageContent, OccurredAtUtc)` — the room id is
+  carried because the broadcast needs to know which SignalR group to target; `OccurredAtUtc` is the post
+  instant, not a second clock reading.
+- EF materialisation: a private parameterless constructor exists solely for EF Core (owned value objects
+  cannot be bound through a parameterised constructor). See the note in task 1.7.
+Unit tests (`tests/Chat.UnitTests/Domain/Messages/MessageTests.cs`, 14 cases):
+- `PostByParticipant_ValidInput_RaisesMessagePosted`, `PostByParticipant_ValidInput_DoesNotProduceABotAuthor`, `PostByParticipant_BotAuthor_ReturnsFailure`.
+- `PostByBot_ValidInput_SetsBotAuthorAndOrigin`.
+- `Post_ValidInput_RaisesExactlyOneEventCarryingIdsAndContent` (`[Theory]`), `ClearDomainEvents_AfterPost_RemovesTheRecordedEvent`.
+- `Post_DefaultChatRoomId_ReturnsFailure` (`[Theory]`), `Post_DefaultPostTime_ReturnsFailure` (`[Theory]`), `Post_NonUtcPostTime_NormalisesToUtcWithoutChangingTheInstant`, `Post_TwoMessages_GetDistinctIdentities`, `Constructors_AreAllNonPublic_SoTheFactoriesAreTheOnlyEntryPoint`.
 
 ### [ ] 1.5 Model the ChatRoom aggregate
 Files: `src/Chat.Domain/ChatRooms/{ChatRoom.cs,RoomName.cs,ChatRoomCreated.cs}`
@@ -140,6 +158,11 @@ No tests (interfaces only) — the commit must still build clean.
 Files: `src/Chat.Infrastructure/Persistence/{ChatDbContext.cs,Configurations/*,Migrations/*}`, `src/Chat.Infrastructure/Identity/ApplicationUser.cs`, `src/Chat.Infrastructure/DependencyInjection.cs`
 Acceptance:
 - `ChatDbContext : IdentityDbContext<ApplicationUser>` with value converters for the strongly-typed ids and value objects.
+- `Message` is materialised through its private parameterless constructor (added in 1.4) and its
+  properties are `private init`, so the mapping must leave the default backing-field access mode in
+  place — no `UsePropertyAccessMode(PropertyAccessMode.Property)` on `Author`, `Content`, `Origin`,
+  `PostedAtUtc` or `ChatRoomId`. `MessageAuthor` maps as an owned/complex type (`UserId`,
+  `DisplayName`), `MessageContent` through a `string` converter.
 - Composite index `IX_Messages_ChatRoomId_PostedAtUtc`; unique index on `ChatRooms.Name`.
 - `AddPersistence` registers SQL Server from `ConnectionStrings:ChatDatabase` (with `EnableRetryOnFailure` for container startup races), the repositories and `IUnitOfWork`. A missing connection string fails fast at startup with a clear message.
 - `dotnet ef migrations add InitialCreate` committed; `dotnet ef database update` creates `ChatDb` and succeeds from a clean checkout against the compose container.
