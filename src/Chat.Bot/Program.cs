@@ -1,4 +1,5 @@
 using Chat.Application;
+using Chat.Application.Abstractions.Hosting;
 using Chat.Infrastructure;
 using Chat.Infrastructure.HealthChecks;
 
@@ -7,7 +8,10 @@ using Chat.Infrastructure.HealthChecks;
 WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
 
 // Composition root: the bot is a separate process and never references Chat.Web.
-builder.Services.AddApplication();
+// IBotFeature scopes the handler scan to the bot's own use cases, so the shared Application assembly
+// never asks this host to construct a handler that needs the database it deliberately does not have.
+builder.Services.AddApplication<IBotFeature>();
+builder.Services.AddSystemClock();
 builder.Services.AddMessaging(builder.Configuration);
 builder.Services.AddStockQuotes(builder.Configuration);
 

@@ -1,4 +1,5 @@
 using Chat.Application;
+using Chat.Application.Abstractions.Hosting;
 using Chat.Application.Abstractions.Persistence;
 using Chat.Application.Contracts.Messages;
 using Chat.Application.Features.Messages.GetLatestMessages;
@@ -24,7 +25,7 @@ public sealed class GetLatestMessagesRegistrationTests
     {
         ServiceCollection services = new();
         services.AddSingleton(typeof(ILogger<>), typeof(NullLogger<>));
-        services.AddApplication();
+        services.AddApplication<IWebFeature>();
         services.AddSingleton(Substitute.For<IChatRoomRepository>());
         services.AddSingleton(Substitute.For<IMessageRepository>());
 

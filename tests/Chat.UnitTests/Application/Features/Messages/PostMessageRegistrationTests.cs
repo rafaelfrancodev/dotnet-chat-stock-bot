@@ -1,4 +1,5 @@
 using Chat.Application;
+using Chat.Application.Abstractions.Hosting;
 using Chat.Application.Abstractions.Persistence;
 using Chat.Application.Abstractions.Realtime;
 using Chat.Application.Abstractions.Stocks;
@@ -44,7 +45,7 @@ public sealed class PostMessageRegistrationTests
     {
         ServiceCollection services = new();
         services.AddSingleton(typeof(ILogger<>), typeof(NullLogger<>));
-        services.AddApplication();
+        services.AddApplication<IWebFeature>();
         services.AddSingleton(_chatRooms);
         services.AddSingleton(_messages);
         services.AddSingleton(_unitOfWork);

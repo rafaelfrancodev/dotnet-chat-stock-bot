@@ -1,3 +1,4 @@
+using Chat.Application.Abstractions.Hosting;
 using Chat.Application.Abstractions.Messaging;
 using Chat.Application.Abstractions.Stocks;
 using Chat.Application.Abstractions.Time;
@@ -25,7 +26,7 @@ namespace Chat.Application.Features.StockCommands.RequestStockQuote;
 internal sealed class RequestStockQuoteHandler(
     IStockQuoteRequester stockQuotes,
     IDateTimeProvider clock)
-    : ICommandHandler<RequestStockQuoteCommand>
+    : ICommandHandler<RequestStockQuoteCommand>, IWebFeature
 {
     public async Task<Result> Handle(RequestStockQuoteCommand request, CancellationToken cancellationToken)
     {

@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using Chat.Application.Abstractions.Hosting;
 using Chat.Application.Abstractions.Messaging;
 using Chat.Application.Abstractions.Persistence;
 using Chat.Application.Abstractions.Realtime;
@@ -55,7 +56,7 @@ internal sealed class PostMessageHandler(
     IChatNotifier notifier,
     IDateTimeProvider clock,
     ISender sender)
-    : ICommandHandler<PostMessageCommand, PostMessageOutcome>
+    : ICommandHandler<PostMessageCommand, PostMessageOutcome>, IWebFeature
 {
     public async Task<Result<PostMessageOutcome>> Handle(
         PostMessageCommand request,

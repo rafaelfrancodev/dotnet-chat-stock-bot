@@ -77,6 +77,32 @@ Files: `Directory.Packages.props`, `src/Chat.Infrastructure/{DependencyInjection
 
 ## Phase 1 — Mandatory features
 
+### [x] 1.10a Scope handler registration per host so both processes start
+Files: `src/Chat.Application/Abstractions/Hosting/{IWebFeature,IBotFeature}.cs`, `src/Chat.Application/DependencyInjection.cs`, the three existing handlers, `src/Chat.Web/{Program.cs,Hubs/ChatHub.cs,Realtime/SignalRChatNotifier.cs}`, `src/Chat.Bot/Program.cs`
+
+Fixes a defect introduced in 1.9: **neither host could start.**
+- `AddApplication()` scanned the whole assembly, so MediatR registered every handler in both processes.
+  Chat.Bot was asked to construct `PostMessageHandler` / `GetLatestMessagesHandler`, which need the
+  `IChatRoomRepository` it deliberately does not have, and `RequestStockQuoteHandler`, which needs a clock
+  it had not registered. Chat.Web failed separately because `IChatNotifier` had no implementation yet.
+- `AddApplication<TFeature>()` now filters the scan by a host marker — `IWebFeature` or `IBotFeature`.
+  Every handler declares which process runs it, so the bot's lack of database access stays structural
+  rather than accidental: marking a persistence-dependent handler `IBotFeature` fails at startup.
+- Chat.Bot additionally calls `AddSystemClock()`.
+- `SignalRChatNotifier` (over `IHubContext<ChatHub>`) implements `IChatNotifier` in Chat.Web,
+  group-scoped, never `Clients.All`. **`ChatHub` is deliberately not mapped yet** — mapping it before
+  authentication exists (1.11) would expose an unauthenticated realtime surface. Task 1.12 adds
+  `[Authorize]`, `JoinRoom`, `SendMessage` and the `MapHub` call.
+
+Unit tests (`tests/Chat.UnitTests/Application/HostFeatureTests.cs`, 4 cases):
+- `EveryHandler_DeclaresExactlyOneHostThatRunsIt` — a handler that forgets its marker is registered by
+  nobody and surfaces at runtime as "no handler for request"; this makes it a build failure instead.
+- `BotHost_RegistersNoHandlerThatNeedsPersistenceOrTheChatSurface`, `WebHost_RegistersOnlyItsOwnHandlers`,
+  `BotHost_RegistersOnlyItsOwnHandlers` (asserted as an absence, because the bot correctly has no
+  handlers until 1.15).
+
+**Verified:** both hosts reach `/health/live` 200 with zero unhandled exceptions.
+
 ### [x] 1.1 Model the message value objects
 Files: `src/Chat.Domain/Messages/{MessageContent,MessageAuthor,MessageId,MessageOrigin}.cs`, `src/Chat.Domain/ChatRooms/ChatRoomId.cs`
 Acceptance:
@@ -507,12 +533,10 @@ Inherited from 1.10 (do not rediscover):
   never `AddConsumer<T>()` — that extension is what pins the endpoint to
   `MessagingConstants.StockQuoteRequestQueue`. `IStockQuoteResponder` is already registered by
   `AddMessaging`, so the bot only has to consume and publish.
-- **Fix the bot's startup first.** `dotnet run --project src/Chat.Bot` currently throws: `AddApplication()`
-  makes MediatR register `PostMessageHandler` / `GetLatestMessagesHandler` in the bot, and Development's
-  `ValidateOnBuild` rejects them because the bot has no `IChatRoomRepository` (by design — it must never
-  call `AddPersistence()`). The bot also needs `AddSystemClock()` for `IDateTimeProvider`. Simplest fix
-  that keeps the layering: give `AddApplication` a way to register only the handlers a host can satisfy
-  (MediatR's `TypeEvaluator`), rather than handing the bot a repository.
+- **Mark `ResolveStockQuoteHandler` with `IBotFeature`** (from 1.10a) or the bot will not register it and
+  the request consumer will fail with "no handler for request". It must not take any persistence
+  dependency — `HostFeatureTests.BotHost_RegistersNoHandlerThatNeedsPersistenceOrTheChatSurface` enforces
+  that. The bot's startup defect itself is already fixed in 1.10a.
 Unit tests:
 - `Handle_ValidQuote_PublishesExpectedMessageFormat`
 - `Handle_SymbolNotFound_PublishesFriendlyMessage`

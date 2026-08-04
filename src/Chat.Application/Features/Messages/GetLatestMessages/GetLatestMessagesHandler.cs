@@ -1,3 +1,4 @@
+using Chat.Application.Abstractions.Hosting;
 using Chat.Application.Abstractions.Messaging;
 using Chat.Application.Abstractions.Persistence;
 using Chat.Application.Contracts.Messages;
@@ -21,7 +22,7 @@ namespace Chat.Application.Features.Messages.GetLatestMessages;
 internal sealed class GetLatestMessagesHandler(
     IChatRoomRepository chatRooms,
     IMessageRepository messages)
-    : IQueryHandler<GetLatestMessagesQuery, IReadOnlyList<MessageDto>>
+    : IQueryHandler<GetLatestMessagesQuery, IReadOnlyList<MessageDto>>, IWebFeature
 {
     public async Task<Result<IReadOnlyList<MessageDto>>> Handle(
         GetLatestMessagesQuery request,
