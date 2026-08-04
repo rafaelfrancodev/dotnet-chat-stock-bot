@@ -139,12 +139,31 @@ Unit tests (`tests/Chat.UnitTests/Domain/Messages/MessageTests.cs`, 14 cases):
 - `Post_ValidInput_RaisesExactlyOneEventCarryingIdsAndContent` (`[Theory]`), `ClearDomainEvents_AfterPost_RemovesTheRecordedEvent`.
 - `Post_DefaultChatRoomId_ReturnsFailure` (`[Theory]`), `Post_DefaultPostTime_ReturnsFailure` (`[Theory]`), `Post_NonUtcPostTime_NormalisesToUtcWithoutChangingTheInstant`, `Post_TwoMessages_GetDistinctIdentities`, `Constructors_AreAllNonPublic_SoTheFactoriesAreTheOnlyEntryPoint`.
 
-### [ ] 1.5 Model the ChatRoom aggregate
+### [x] 1.5 Model the ChatRoom aggregate
 Files: `src/Chat.Domain/ChatRooms/{ChatRoom.cs,RoomName.cs,ChatRoomCreated.cs}`
 Acceptance:
-- `RoomName.Create` trims, collapses whitespace, rejects empty and `> 60` chars.
-- `ChatRoom.Create` raises `ChatRoomCreated`.
-Unit tests: `Create_EmptyName_ReturnsFailure`, `Create_ValidName_RaisesChatRoomCreated`.
+- `RoomName.Create` trims, collapses whitespace, rejects empty and `> 60` chars (`RoomName.MaxLength`).
+- `ChatRoom.Create(RoomName, DateTimeOffset)` raises `ChatRoomCreated`.
+- **`ChatRoom` holds no collection of messages.** A post is its own aggregate referencing the room by
+  `ChatRoomId`; a navigation collection would make the "last 50" query load an unbounded history and
+  would put two aggregates that never change together inside one consistency boundary. A reflection
+  test pins it.
+- Normalisation runs **before** the length check, exactly as `MessageContent` trims before measuring:
+  the limit applies to what is stored and displayed, so a name that only exceeded it because of
+  duplicated spaces is accepted rather than rejected for invisible input.
+- Whitespace collapsing is a hand-written pass, not a `Regex`: `NeedsCollapsing` scans the trimmed
+  string and an already-normalised name is returned as-is, so the common path allocates nothing and
+  only a name that must be rewritten reaches the `StringBuilder`. All Unicode whitespace counts
+  (`char.IsWhiteSpace`), so tabs, newlines and U+00A0 cannot smuggle layout into a room name.
+- Same `Result`-vs-throw split as 1.4: a `default` `createdAtUtc` is an expected failure
+  (`Errors.MissingCreationTime`), a null `RoomName` is a programmer error (`ArgumentNullException`).
+  No clock in the domain — the caller supplies the instant and it is normalised with `ToUniversalTime()`.
+- `ChatRoomCreated(ChatRoomId, RoomName, OccurredAtUtc)` mirrors `MessagePosted`'s shape.
+- EF materialisation: a private parameterless constructor exists solely for EF Core, as on `Message`.
+Unit tests (`tests/Chat.UnitTests/Domain/ChatRooms/{RoomNameTests,ChatRoomTests}.cs`, 28 cases):
+- `Create_EmptyName_ReturnsFailure`, `Create_WhitespaceOnly_ReturnsFailure` (`[Theory]`), `Create_TooLong_ReturnsFailure`, `Create_ExactlyMaxLength_Succeeds`, `Create_LengthExceededOnlyByCollapsibleWhitespace_NormalisesAndSucceeds`.
+- `Create_InternalWhitespace_CollapsesToSingleSpaces` (`[Theory]`), `Create_NonBreakingSpace_IsCollapsedLikeAnyOtherWhitespace`, `Create_SurroundingWhitespace_TrimsAndSucceeds`, `Equality_DifferentlySpacedInput_AreEqual`, `Equality_DifferentValue_AreNotEqual`, `Equality_DifferentCasing_AreNotEqual`, `ToString_ValidName_ReturnsNormalisedText`.
+- `Create_ValidName_RaisesChatRoomCreated`, `Create_ValidName_RaisesExactlyOneEventCarryingIdAndName`, `Create_NullName_Throws`, `Create_DefaultCreationTime_ReturnsFailure`, `Create_NonUtcCreationTime_NormalisesToUtcWithoutChangingTheInstant`, `Create_TwoRooms_GetDistinctIdentities`, `ClearDomainEvents_AfterCreate_RemovesTheRecordedEvent`, `Constructors_AreAllNonPublic_SoTheFactoryIsTheOnlyEntryPoint`, `ChatRoom_HoldsNoMessages_SoTheAggregateBoundaryIsPreserved`.
 
 ### [ ] 1.6 Declare the Application abstractions
 Files: `src/Chat.Application/Abstractions/{Persistence,Realtime,Stocks,Time}/*`
@@ -163,7 +182,11 @@ Acceptance:
   place — no `UsePropertyAccessMode(PropertyAccessMode.Property)` on `Author`, `Content`, `Origin`,
   `PostedAtUtc` or `ChatRoomId`. `MessageAuthor` maps as an owned/complex type (`UserId`,
   `DisplayName`), `MessageContent` through a `string` converter.
-- Composite index `IX_Messages_ChatRoomId_PostedAtUtc`; unique index on `ChatRooms.Name`.
+- `ChatRoom` is materialised the same way (private parameterless constructor from 1.5, `private init`
+  properties): `RoomName` maps through a `string` converter and the default backing-field access mode
+  must stay in place. Room name uniqueness is a database concern — the aggregate cannot see its peers.
+- Composite index `IX_Messages_ChatRoomId_PostedAtUtc`; unique index on `ChatRooms.Name` (case
+  sensitivity follows the column collation; `RoomName` itself is case-preserving and case-sensitive).
 - `AddPersistence` registers SQL Server from `ConnectionStrings:ChatDatabase` (with `EnableRetryOnFailure` for container startup races), the repositories and `IUnitOfWork`. A missing connection string fails fast at startup with a clear message.
 - `dotnet ef migrations add InitialCreate` committed; `dotnet ef database update` creates `ChatDb` and succeeds from a clean checkout against the compose container.
 Unit tests: none (covered by 1.16 integration tests); the migration must be verified manually.
