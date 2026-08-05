@@ -22,6 +22,9 @@
     <!-- The SignalR hub and its notifier are host code; they are unit-tested with substituted
          SignalR abstractions, no server and no connection. -->
     <ProjectReference Include="..\..\src\Chat.Web\Chat.Web.csproj" />
+    <!-- Same reason for the bot's inbound adapter: the request consumer is unit-tested over
+         MassTransit's in-memory ITestHarness, no broker and no Stooq. -->
+    <ProjectReference Include="..\..\src\Chat.Bot\Chat.Bot.csproj" />
   </ItemGroup>
 
 </Project>

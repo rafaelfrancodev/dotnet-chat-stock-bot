@@ -88,6 +88,7 @@ public sealed class StockQuoteEndpointExtensionsTests
         RequestId: Guid.CreateVersion7(),
         ChatRoomId: Guid.CreateVersion7(),
         StockCode: "aapl.us",
+        RequestedByUserId: "user-42",
         Outcome: StockQuoteOutcome.Quoted,
         Price: 93.42m,
         Message: "AAPL.US quote is $93.42 per share",

@@ -26,6 +26,7 @@ public sealed class StockQuoteContractSerializationTests
         RequestId: Request.RequestId,
         ChatRoomId: Request.ChatRoomId,
         StockCode: "aapl.us",
+        RequestedByUserId: Request.RequestedByUserId,
         Outcome: StockQuoteOutcome.Quoted,
         Price: 93.42m,
         Message: "AAPL.US quote is $93.42 per share",
@@ -99,6 +100,20 @@ public sealed class StockQuoteContractSerializationTests
         string json = JsonSerializer.Serialize(resolved, WireOptions);
 
         JsonSerializer.Deserialize<StockQuoteResolved>(json, WireOptions)!.Price.Should().Be(1234.05m);
+    }
+
+    /// <summary>
+    /// The answer carries the requester's id so Chat.Web can aim the outage banner at one participant.
+    /// If it were dropped on the wire the alert would silently have nowhere to go — and
+    /// <c>Clients.User(null)</c> fails at the hub, not here, which is a much worse place to find out.
+    /// </summary>
+    [Fact]
+    public void Serializer_RoundTrip_PreservesTheRequesterTheAlertIsAimedAt()
+    {
+        string json = JsonSerializer.Serialize(Response, WireOptions);
+
+        JsonSerializer.Deserialize<StockQuoteResolved>(json, WireOptions)!
+            .RequestedByUserId.Should().Be(Request.RequestedByUserId);
     }
 
     /// <summary>

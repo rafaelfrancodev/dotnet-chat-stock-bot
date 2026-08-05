@@ -778,26 +778,109 @@ participant's connections, reaches neither the room nor every connection, forwar
 token, rejects a missing recipient or alert, and `QuoteServiceUnavailable` really is an error-severity
 message naming Stooq and telling the participant to try again.
 
-### [ ] 1.15 Implement the bot use case and worker
-Files: `src/Chat.Application/Features/StockCommands/ResolveStockQuote/*`, `src/Chat.Bot/StockQuoteRequestConsumer.cs`, `src/Chat.Bot/Program.cs`
-Acceptance:
-- `ResolveStockQuoteHandler` calls `IStockQuoteProvider`, formats the message and publishes `StockQuoteResolved` through `IStockQuoteResponder`.
-- Exact wording on success: `"AAPL.US quote is $93.42 per share"` (price formatted with 2 decimals, invariant culture).
-- Unknown symbol and lookup failure produce friendly messages and `Outcome != Quoted`; the handler never throws.
-- The worker is a `BackgroundService`, fully async, honours `stoppingToken`.
-Inherited from 1.10 (do not rediscover):
-- Register the consumer with `configurator.AddStockQuoteRequestConsumer<StockQuoteRequestConsumer>()`,
-  never `AddConsumer<T>()` — that extension is what pins the endpoint to
-  `MessagingConstants.StockQuoteRequestQueue`. `IStockQuoteResponder` is already registered by
-  `AddMessaging`, so the bot only has to consume and publish.
-- **Mark `ResolveStockQuoteHandler` with `IBotFeature`** (from 1.10a) or the bot will not register it and
-  the request consumer will fail with "no handler for request". It must not take any persistence
-  dependency — `HostFeatureTests.BotHost_RegistersNoHandlerThatNeedsPersistenceOrTheChatSurface` enforces
-  that. The bot's startup defect itself is already fixed in 1.10a.
-Unit tests:
-- `Handle_ValidQuote_PublishesExpectedMessageFormat`
-- `Handle_SymbolNotFound_PublishesFriendlyMessage`
-- `Handle_ProviderThrows_PublishesLookupFailedAndDoesNotRethrow`
+### [x] 1.15 Implement the bot use case and worker
+Files: `src/Chat.Application/Features/StockCommands/ResolveStockQuote/{ResolveStockQuoteCommand,ResolveStockQuoteHandler,StockQuoteAnswer}.cs`,
+`src/Chat.Application/Contracts/Messaging/StockQuoteResolved.cs`, `src/Chat.Bot/{StockQuoteRequestConsumer.cs,Program.cs,Chat.Bot.csproj}`,
+`tests/Chat.UnitTests/Chat.UnitTests.csproj`
+Acceptance: all met — see the verification below.
+Decisions taken here (later tasks must conform):
+- **There is no `BackgroundService`, and this task's original wording is corrected rather than obeyed.**
+  That line predates task 0.9's move from raw `RabbitMQ.Client` to MassTransit: the bus is already a
+  hosted service that owns the connection, the prefetch window and the retry policy, and it *pushes*
+  `StockQuoteRequested` into an `IConsumer<T>`. A hand-rolled polling loop beside it would duplicate all
+  of that and lose what 1.10 measured — 4 attempts ~2 s apart, then `stock-quote-requests_error` instead
+  of an infinite requeue. The requirement the wording protected (fully async, no blocking call, honours
+  the stopping token) is met by taking `ConsumeContext.CancellationToken` as the only token the use case
+  ever sees; MassTransit cancels it on shutdown. Recorded on the consumer type itself.
+- **`StockQuoteResolved` now carries `RequestedByUserId`** (additive, mirroring `StockQuoteRequested`'s
+  member order). Added here rather than in 1.16 because the **bot is the publisher** and it already
+  receives the value; 1.16 only reads it. Round-trip test added:
+  `Serializer_RoundTrip_PreservesTheRequesterTheAlertIsAimedAt`.
+- **The wording lives in `StockQuoteAnswer`, three pure static methods, not inline in the handler.** It is
+  the bot's only user-visible output and the one string the challenge quotes verbatim, so it is pinned by
+  offline tests. The three lines are:
+  - `Quoted`: `"AAPL.US quote is $93.42 per share"` — `Display` for the ticker, `price.ToString("F2",
+    CultureInfo.InvariantCulture)`, then interpolated as a string so no ambient culture can reach the
+    output through either the number or the string-building. `InvariantGlobalization` is deliberately
+    `false` in this solution, so a de-DE machine would otherwise post `"$93,42"`.
+  - `SymbolNotFound`: `"Sorry, I could not find a quote for AAPL.XX."` — the wording `ARCHITECTURE.md` §5
+    already documented, kept rather than reinvented.
+  - `Unavailable` (`LookupFailed`): `"I could not reach the quote service, so I have no price for AAPL.US
+    right now."` This is the line a reviewer actually reads, because Stooq's `/q/l/` endpoint has answered
+    404 since 1.14. It names the ticker (several lookups can be in flight), blames the upstream rather
+    than the bot, and deliberately carries **no** "try again in a couple of minutes" — 1.14a's
+    `ChatAlert.QuoteServiceUnavailable` delivers that instruction as a banner, so the two complement each
+    other instead of repeating.
+- **The handler answers on every path and returns `Result.Success()` for all three outcomes.** An unknown
+  ticker or an unreachable provider is an answer, not a failed use case: a failed `Result` would only make
+  the consumer log and the room stay silent.
+- **The one `catch` is a contract backstop, not the outage handling.** `IStockQuoteProvider` already
+  converts every Stooq failure mode into `LookupFailed` (1.14), so this `catch` exists for a provider that
+  breaks that promise — logged at **Error**, because it means our own code is wrong, unlike the client's
+  Warning for "Stooq is having a bad day". Genuine caller cancellation is excluded by the same
+  token-signalled filter `StooqClient` uses and propagates, so an abandoned delivery does not post noise
+  into a room nobody is waiting on.
+- **`RespondAsync` is deliberately outside that backstop.** A refused publish is not an answer the bot can
+  reword, so it propagates and MassTransit retries then dead-letters. Swallowing it would lose the request
+  silently.
+- **A `Quoted` outcome with a null price is downgraded to `LookupFailed`** before anything is published, so
+  the outcome 1.16 reads to decide about the alert always agrees with the text the participant sees.
+  `StockQuoteLookup.Quoted(decimal)` cannot produce that, but the record's primary constructor can — and
+  `"$0.00 per share"` is noise dressed up as data, the same call 1.14's parser made about a zero close.
+- **`ResolveStockQuoteCommand` carries a `StockCode`, not a string**, exactly like `RequestStockQuoteCommand`,
+  so mapping the wire string is the consumer's job at the boundary and an unvalidated ticker cannot reach
+  the Stooq URL. **No validator**: the only field with a rule is the value object, and a defaulted room id
+  is already an expected failure in 1.16 (`ChatRoomErrors.NotFound`).
+- **One failure rule in the consumer:** an expected failure (a ticker `StockCode.Create` rejects, a failed
+  `Result` from the dispatch) is logged and acknowledged, because an identical redelivery would reproduce
+  it four times and then dead-letter something already understood; an unexpected exception propagates so
+  MassTransit applies its retry policy and the `_error` queue. No manual nack path exists.
+- The handler is marked `IBotFeature`, takes no persistence port, and logs one Information line per
+  resolved command (per `/stock=`, not per chat message).
+- `Chat.Bot` gained `InternalsVisibleTo` for the test projects and `Chat.UnitTests` a project reference to
+  it, for the same reason 1.12 did that for `Chat.Web`: the inbound adapter is host code worth unit-testing
+  with a substituted `ConsumeContext` and MassTransit's in-memory `ITestHarness`, with no broker.
+Unit tests (33 new cases; suite **467 passing**, all offline):
+- `Application/Features/StockCommands/ResolveStockQuoteHandlerTests` (17):
+  `Handle_ValidQuote_PublishesExpectedMessageFormat` (the exact string),
+  `Handle_ValidQuote_RendersTwoDecimalsAndTheUpperCaseTicker` (`[Theory]`, 4 cases),
+  `Handle_CommaDecimalCulture_StillFormatsThePriceWithADot` (asserts de-DE really disagrees first, so it
+  cannot pass vacuously), `Handle_ValidQuote_PublishesTheOutcomeAndThePriceAlongsideTheText`,
+  `Handle_SymbolNotFound_PublishesFriendlyMessage`, `Handle_LookupFailed_PublishesAFriendlyOutageMessage`,
+  `Handle_ProviderThrows_PublishesLookupFailedAndDoesNotRethrow`,
+  `Handle_QuotedWithoutAPrice_IsDowngradedToLookupFailed`,
+  `Handle_Always_EchoesTheCorrelationRoomTickerAndRequester`,
+  `Handle_Always_StampsTheAnswerWithTheInjectedClock`,
+  `Handle_Always_ForwardsTheCancellationTokenToTheLookupAndThePublish`,
+  `Handle_CallerCancels_PropagatesTheCancellationWithoutPublishing`,
+  `Handle_PublishFails_PropagatesSoTheDeliveryIsRetried`,
+  `Handle_Always_LooksUpTheValidatedCodeExactlyOnce`, `Handle_NullCommand_Throws`,
+  `Handler_IsMarkedAsABotFeature_SoChatBotRegistersIt`,
+  `Constructor_TakesNoPersistenceDependency_SoTheBotStaysDecoupledFromTheDatabase`.
+- `Bot/StockQuoteRequestConsumerTests` (12): `Consume_StockQuoteRequested_DispatchesTheResolveCommand`,
+  `Consume_UnnormalisedStockCode_IsRebuiltThroughTheValueObject` (`[Theory]`),
+  `Consume_UnusableStockCode_DispatchesNothingAndDoesNotFault` (`[Theory]`, 5 cases including
+  `aapl.us&f=x` and `../../etc/passwd`), `Consume_Always_ForwardsTheConsumeCancellationToken`,
+  `Consume_DispatchFails_AcknowledgesInsteadOfFaultingTheDelivery`, `Consume_NullContext_Throws`,
+  `Consume_PublishedRequest_ReachesTheConsumerOnTheRequestQueue` (in-memory `ITestHarness`: asserts the
+  input-queue address, that the delivery did not fault, and that the use case was dispatched).
+- `StockQuoteContractSerializationTests` gained `Serializer_RoundTrip_PreservesTheRequesterTheAlertIsAimedAt`.
+**Verified** against the running stack (both hosts up, `/health` 200 on each, no unhandled exception):
+- `Chat.Bot` logs `Configured endpoint stock-quote-requests, Consumer: Chat.Bot.StockQuoteRequestConsumer`;
+  the management API reports `stock-quote-requests` `durable=True state=running consumers=1`.
+- `/stock=aapl.us` sent from an authenticated SignalR client (`alice@example.com`, long polling, identity
+  from the cookie) produced **no** `ReceiveMessage` frame, and in the bot log:
+  `Stooq answered 404 for aapl.us; reporting a failed lookup.` then
+  `Resolved aapl.us for request 019fd26b-72d6-744d-8cf4-f1abb59262c4 as LookupFailed.` — the
+  `LookupFailed` path 1.14 predicted, exercised end to end with no crash and no dead-letter.
+- The answer really reached the broker and has nowhere to go until 1.16 exists: exchange
+  `Chat.Application.Contracts.Messaging:StockQuoteResolved` reports `publish_in: 1` with **zero bindings**
+  and no outgoing route, `stock-quote-responses` returns **404** from the management API, and there is no
+  `_skipped` queue — that suffix only exists for a receive endpoint that received a message it had no
+  consumer for, which is not this case. RabbitMQ discarded the unroutable message.
+- A plain control line posted and broadcast normally in the same session, and
+  `SELECT COUNT(*) FROM Messages WHERE Content LIKE '/%'` → **0**. The control row was deleted afterwards
+  (`Messages` empty again, `ChatRooms` still 1).
 
 ### [ ] 1.16 Consume quote responses in Chat.Web and post them as the bot
 Files: `src/Chat.Web/Messaging/StockQuoteResponseConsumer.cs`, `src/Chat.Application/Features/Messages/PostBotMessage/*`
@@ -817,9 +900,18 @@ Inherited from 1.14a — **the outage banner**:
   The plumbing and the client rendering already exist; 1.16 only supplies the trigger.
 - `SymbolNotFound` does **not** raise an alert — an unknown ticker is a real answer from a working
   service, so it stays a bot chat message. Only `LookupFailed` means "the provider is down, retry".
-- **`StockQuoteResolved` does not currently carry `RequestedByUserId`.** Add it to the contract (the
-  bot already receives it on `StockQuoteRequested`) so the alert can be aimed at the participant who
-  typed the command. Additive change; update the round-trip serialization test.
+Inherited from 1.15 (do not rediscover):
+- **`StockQuoteResolved.RequestedByUserId` already exists.** 1.15 added it (the bot is the publisher and
+  already had the value) and the round-trip test
+  `Serializer_RoundTrip_PreservesTheRequesterTheAlertIsAimedAt` pins it. Read it, do not re-add it.
+- **Post `StockQuoteResolved.Message` verbatim.** The bot owns the wording (`StockQuoteAnswer`, three
+  lines, unit-tested); re-formatting or appending in Chat.Web would put the challenge's graded sentence in
+  two places. `Price` and `Outcome` are for the alert decision and logging, not for rendering.
+- The answer is always present for all three outcomes — 1.15 never publishes an empty message and never
+  returns a failed `Result` for a lookup outcome — so `Message` needs no fallback text here.
+- Today a published `StockQuoteResolved` is **unroutable**: the exchange exists with zero bindings and
+  RabbitMQ discards the message (measured in 1.15). Registering this consumer is what creates
+  `stock-quote-responses` and its binding, so the first thing to verify is that the queue appears.
 Unit tests: `Handle_BotMessage_PersistsWithBotAuthorAndBroadcasts`, `Handle_UnknownRoom_ReturnsFailureWithoutBroadcast`, `Handle_LookupFailed_AlertsTheRequesterOnly`, `Handle_SymbolNotFound_RaisesNoAlert`.
 
 ### [ ] 1.17 Add the integration test suite
