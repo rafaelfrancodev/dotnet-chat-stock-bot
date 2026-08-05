@@ -520,14 +520,75 @@ pins, since EF's SQLite provider resolves an advisory-carrying 2.1.11.
 - `FKS_ON_MESSAGES=0` — 1.7's no-foreign-key decision survived the migration regeneration.
 - Both hosts start with zero unhandled exceptions; `/health` 200 on each.
 
-### [ ] 1.12 Implement ChatHub and the SignalR notifier
-Files: `src/Chat.Web/Hubs/ChatHub.cs`, `src/Chat.Web/Realtime/SignalRChatNotifier.cs`
-Acceptance:
-- `[Authorize]` on the hub. Author id and display name come from `Context.User`; the client payload carries only `roomId` and `text`.
-- `JoinRoom` adds the connection to `Groups`, `OnDisconnectedAsync` cleans up.
-- Broadcasts go to `Clients.Group(...)`, never `Clients.All`.
-- Hub methods are ~5 lines: claims → `ISender.Send` → map `Result` (errors go to `Clients.Caller` only).
-Unit tests: `SendMessage_UsesClaimsIdentity_NotClientPayload` (hub tested with a substituted `HubCallerContext`).
+### [x] 1.12 Implement ChatHub and the SignalR notifier
+Files: `src/Chat.Web/Hubs/ChatHub.cs`, `src/Chat.Web/Program.cs`, `src/Chat.Web/Chat.Web.csproj`, `tests/Chat.UnitTests/{Chat.UnitTests.csproj,Web/*}`
+Acceptance: all met — see the verification below. `SignalRChatNotifier` already shipped in 1.10a and was
+left untouched; this task only added the tests that pin its group scoping.
+Decisions taken here (later tasks must conform):
+- **`JoinRoom` returns the history, and joins the group before reading it.** One round trip instead of a
+  page fetch plus a subscribe, and the order closes a real gap: reading first would drop any post
+  committed between the read and the subscription. In this order the worst case is a post that arrives
+  both live and in the history, so **1.13 must de-duplicate by `MessageDto.Id`** — a duplicate is
+  recoverable, a missing message is not.
+- **The count is not on the wire.** `JoinRoom(Guid)` builds `GetLatestMessagesQuery` with its own default,
+  which 1.8 both defaults and caps at 50, so no client can widen the read.
+- **`OnDisconnectedAsync` is deliberately not overridden** (a documented deviation from this task's
+  original wording). SignalR removes a closed connection from every group it joined, the hub keeps no
+  per-connection state to clean up, and the framework already logs connection lifetime at `Debug` — an
+  override would be ceremony asserting a cleanup that does not exist. `Hub_KeepsNoMutableState_SoADisconnectHasNothingToCleanUp`
+  pins both halves: the only field is the injected `ISender`, and `OnDisconnectedAsync` is still `Hub`'s.
+- **Group membership is not restored on reconnect and no server-side map exists to restore it** (that is
+  exactly the unbounded per-connection state the resource budget rules out). The client re-joins from its
+  `onreconnected` callback; because `JoinRoom` also returns the history, the same call fills whatever the
+  connection missed while it was down. **1.13 must wire that callback.**
+- **One error channel: `ChatHub.ReceiveError` to `Clients.Caller`.** Only curated `Error.Message` text is
+  sent — 1.9 already guarantees untrusted input is never put into an error — and an unexpected exception
+  becomes SignalR's own generic message instead, so nothing internal leaks. An error is never sent to the
+  group. `JoinRoom` answers a rejected request with an empty history after reporting the error.
+- **An unusable room id is rejected at the hub**, before any dispatch: `ChatHub.Errors.InvalidChatRoomId`
+  (`ChatRoom.Invalid`). Owned by the transport layer because this is the layer that turns a wire `Guid`
+  into a `ChatRoomId`; it also spares the pipeline a dispatch that the validator would only reject.
+- **Nothing is returned to the caller on success** (1.9's decision, now enforced by a test over both
+  outcomes): a post has already reached the sender through the group broadcast, and a quote request has
+  no answer yet.
+- **Identity**: `Context.UserIdentifier` for the id and the `display_name` claim for the name, falling
+  back to the user name only for a ticket issued before 1.11's claims factory. Empty values are left to
+  `PostMessageValidator`, so the hub never has to decide what a missing identity means.
+- `ChatHub.Route` (`/hubs/chat`) is a constant so 1.13's script and 1.17's tests cannot drift from the
+  mapping. `MapHub` now runs in `Program.cs`, after `UseAuthentication`/`UseAuthorization`.
+- `Chat.UnitTests` gained a project reference to `Chat.Web` and `Chat.Web` an `InternalsVisibleTo` for it:
+  the hub and the notifier are host code that is worth unit-testing with substituted SignalR abstractions,
+  with no server and no connection.
+Unit tests (`tests/Chat.UnitTests/Web/`, 24 cases):
+- `ChatHubTests` (20): `SendMessage_UsesClaimsIdentity_NotClientPayload` (the substituted
+  `HubCallerContext` derives `UserIdentifier` from the subject claim, as `DefaultUserIdProvider` does, so
+  the test really reads the ticket), `SendMessage_Signature_AcceptsOnlyTheRoomAndTheText`,
+  `SendMessage_TicketWithoutADisplayNameClaim_FallsBackToTheUserName`, `Hub_RequiresAnAuthenticatedCaller`,
+  `SendMessage_SuccessfulOutcome_SendsNothingBackToTheCaller` (`[Theory]` over both outcomes),
+  `SendMessage_FailedResult_SendsTheErrorToTheCallerOnly`, `SendMessage_FailedResult_NeverReachesTheRoom`,
+  `SendMessage_EmptyRoomId_IsRejectedWithoutDispatchingACommand`,
+  `SendMessage_Always_ForwardsTheConnectionAbortedToken`,
+  `JoinRoom_ValidRoom_AddsTheConnectionToTheRoomGroup`, `JoinRoom_ValidRoom_ReturnsTheHistoryUntouched`,
+  `JoinRoom_Always_JoinsTheGroupBeforeReadingTheHistory`,
+  `JoinRoom_Always_RequestsTheChallengeLimitAndNoMore`, `JoinRoom_Signature_AcceptsOnlyTheRoom`,
+  `JoinRoom_UnknownRoom_ReportsToTheCallerAndReturnsNoHistory`,
+  `JoinRoom_EmptyRoomId_IsRejectedWithoutJoiningAGroupOrDispatchingAQuery`,
+  `JoinRoom_Always_ForwardsTheConnectionAbortedToken`, `GroupFor_TwoRooms_ProduceDistinctGroupNames`,
+  `Hub_KeepsNoMutableState_SoADisconnectHasNothingToCleanUp`.
+- `SignalRChatNotifierTests` (4): `BroadcastMessageAsync_Always_SendsToTheRoomGroup`,
+  `BroadcastMessageAsync_Always_NeverReachesEveryConnection` (asserts `Clients.All` is never even read),
+  `BroadcastMessageAsync_Always_ForwardsTheCancellationToken`, `BroadcastMessageAsync_NullMessage_Throws`.
+**Verified** against the running stack (both hosts up, `/health` 200 on each, no unhandled exceptions):
+- Anonymous `POST /hubs/chat/negotiate?negotiateVersion=1` → **401** with
+  `Location: /Identity/Account/Login?ReturnUrl=%2Fhubs%2Fchat%2Fnegotiate...`; the same request with the
+  cookie from a real login → 200 with a connection token.
+- Driven over long polling as `alice@example.com`: `JoinRoom` returned `[]` for the empty seeded room;
+  a plain line came back as one `ReceiveMessage` frame with `authorDisplayName: "Alice Anderson"` (from
+  the claim) and `origin: 1`; `/stock=aapl.us` produced **no** `ReceiveMessage` and no error;
+  `/help` produced a caller-only `ReceiveError` with the fixed text and no echo of "help"; an empty room
+  id produced `ReceiveError` "A chat room must be selected…" and an empty history.
+- `SELECT COUNT(*) FROM Messages WHERE Content LIKE '/%'` → **0** after all of it: neither the stock
+  command nor the unknown command reached the table.
 
 ### [ ] 1.13 Add the minimal chat page
 Files: `src/Chat.Web/Pages/Chat.cshtml(.cs)`, `src/Chat.Web/wwwroot/js/chat.js`

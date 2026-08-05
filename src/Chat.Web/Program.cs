@@ -4,6 +4,7 @@ using Chat.Application.Abstractions.Realtime;
 using Chat.Infrastructure;
 using Chat.Infrastructure.HealthChecks;
 using Chat.Infrastructure.Persistence;
+using Chat.Web.Hubs;
 using Chat.Web.Identity;
 using Chat.Web.Realtime;
 
@@ -52,6 +53,10 @@ app.UseAuthorization();
 app.MapStaticAssets();
 app.MapRazorPages().WithStaticAssets();
 app.MapChatHealthChecks();
+
+// Mapped only now that authentication exists: the hub carries [Authorize], so an anonymous negotiate is
+// rejected by the framework before any hub method runs.
+app.MapHub<ChatHub>(ChatHub.Route);
 
 app.Run();
 

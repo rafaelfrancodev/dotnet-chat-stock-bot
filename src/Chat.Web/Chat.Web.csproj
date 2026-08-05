@@ -18,6 +18,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="Chat.UnitTests" />
     <InternalsVisibleTo Include="Chat.IntegrationTests" />
   </ItemGroup>
 
