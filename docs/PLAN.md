@@ -882,37 +882,100 @@ Unit tests (33 new cases; suite **467 passing**, all offline):
   `SELECT COUNT(*) FROM Messages WHERE Content LIKE '/%'` → **0**. The control row was deleted afterwards
   (`Messages` empty again, `ChatRooms` still 1).
 
-### [ ] 1.16 Consume quote responses in Chat.Web and post them as the bot
-Files: `src/Chat.Web/Messaging/StockQuoteResponseConsumer.cs`, `src/Chat.Application/Features/Messages/PostBotMessage/*`
-Acceptance:
-- Consumer deserialises `StockQuoteResolved` and sends `PostBotMessageCommand`.
-- `PostBotMessageHandler` creates a `Message` via `Message.PostByBot`, persists it and broadcasts to the room group.
-- Unparseable payloads are dead-lettered, not requeued.
-Inherited from 1.10 (do not rediscover):
-- Register the consumer with `configurator.AddStockQuoteResponseConsumer<StockQuoteResponseConsumer>()`,
-  never `AddConsumer<T>()`, so the endpoint stays `MessagingConstants.StockQuoteResponseQueue`.
-- Dead-lettering needs no code: measured against the real broker, `Interval(3, 2s)` runs 4 attempts and
-  then MassTransit moves the message to `<queue>_error`. Do not add a manual nack path.
-- Reuse `Chat.Application/Errors/ChatRoomErrors.NotFound` (promoted in 1.9) for the unknown-room failure.
-Inherited from 1.14a — **the outage banner**:
-- When `StockQuoteResolved.Outcome == StockQuoteOutcome.LookupFailed`, also call
-  `IChatNotifier.NotifyAlertAsync(response.RequestedByUserId, ChatAlert.QuoteServiceUnavailable, ct)`.
-  The plumbing and the client rendering already exist; 1.16 only supplies the trigger.
-- `SymbolNotFound` does **not** raise an alert — an unknown ticker is a real answer from a working
-  service, so it stays a bot chat message. Only `LookupFailed` means "the provider is down, retry".
-Inherited from 1.15 (do not rediscover):
-- **`StockQuoteResolved.RequestedByUserId` already exists.** 1.15 added it (the bot is the publisher and
-  already had the value) and the round-trip test
-  `Serializer_RoundTrip_PreservesTheRequesterTheAlertIsAimedAt` pins it. Read it, do not re-add it.
-- **Post `StockQuoteResolved.Message` verbatim.** The bot owns the wording (`StockQuoteAnswer`, three
-  lines, unit-tested); re-formatting or appending in Chat.Web would put the challenge's graded sentence in
-  two places. `Price` and `Outcome` are for the alert decision and logging, not for rendering.
-- The answer is always present for all three outcomes — 1.15 never publishes an empty message and never
-  returns a failed `Result` for a lookup outcome — so `Message` needs no fallback text here.
-- Today a published `StockQuoteResolved` is **unroutable**: the exchange exists with zero bindings and
-  RabbitMQ discards the message (measured in 1.15). Registering this consumer is what creates
-  `stock-quote-responses` and its binding, so the first thing to verify is that the queue appears.
-Unit tests: `Handle_BotMessage_PersistsWithBotAuthorAndBroadcasts`, `Handle_UnknownRoom_ReturnsFailureWithoutBroadcast`, `Handle_LookupFailed_AlertsTheRequesterOnly`, `Handle_SymbolNotFound_RaisesNoAlert`.
+### [x] 1.16 Consume quote responses in Chat.Web and post them as the bot
+Files: `src/Chat.Web/{Messaging/StockQuoteResponseConsumer.cs,Program.cs}`,
+`src/Chat.Application/Features/Messages/PostBotMessage/{PostBotMessageCommand,PostBotMessageHandler}.cs`,
+`docs/ARCHITECTURE.md`
+Acceptance: all met — see the verification below. **This task closes the mandatory end-to-end flow.**
+Decisions taken here (later tasks must conform):
+- **The outage alert is raised in the handler, not in the consumer.** The consumer is a transport adapter
+  with no user-visible behaviour of its own; the handler already holds `IChatNotifier`, already knows the
+  outcome, and has to order the banner against the post (the banner explains the line the participant has
+  just read). Raising it in the consumer would have given Chat.Web a second place that talks to connected
+  clients and split "what a participant sees when a lookup fails" across two layers. The command therefore
+  carries `RequestedByUserId` and `Outcome` — `ARCHITECTURE.md` §3.1's row was widened from
+  `(ChatRoomId, Text)` to match. It reuses `StockQuoteOutcome` rather than introducing a second vocabulary
+  (1.6's rule), and deliberately does **not** carry the wire record itself: a use case that took
+  `StockQuoteResolved` would be versioned with the broker payload.
+- **A `LookupFailed` answer is persisted like any other**, keeping 1.9/§5's standing decision for all three
+  outcomes. Not persisting it was considered — it would keep a third-party outage out of the room's
+  permanent history — but it would also make the answer a participant just read vanish on refresh, which is
+  the "reads as a bug" behaviour that decision exists to prevent. The transient part of the story is the
+  `ChatAlert`, which is never persisted, so the two channels say different things on purpose: the post is
+  what the bot answered, the banner is the state of the system.
+- **Idempotency: the one window that can duplicate a row is closed, and the two that remain are recorded.**
+  This is an at-least-once channel, and everything before `SaveChangesAsync` leaves the store untouched, so
+  the only step that can duplicate a post is a failure *after* the commit. `AnnounceAsync` therefore
+  converts a failed broadcast or alert into `PostBotMessageCommand.Errors.NotAnnounced` instead of throwing:
+  the consumer acknowledges a failed `Result` (1.15's rule), so the delivery is not retried, and the
+  connections that missed the push read the answer back from the last-50 history. A duplicate row is
+  permanent; a missed push is not. Genuine caller cancellation still propagates — the host is stopping and
+  the transport will redeliver whatever we return. Left open on purpose: a commit that succeeds without
+  reporting, and a shutdown between the commit and the ack. Closing either needs a `RequestId` column with a
+  unique index, i.e. a broker correlation id inside an aggregate whose identity has nothing to do with one.
+  `ARCHITECTURE.md` §5 carries the note.
+- **No validator.** Every field already has a checked rule on the path: the room through `ExistsAsync`
+  (`ChatRoomErrors.NotFound`, the shared one — no third copy), the text through `MessageContent.Create`
+  (500-char cap, empty rejected), and the outcome is an enum. Same call 1.15 made for `ResolveStockQuoteCommand`.
+- **A `LookupFailed` payload with no requester still posts the answer**, logs that there was nobody to alert,
+  and raises none: `NotifyAlertAsync` rejects an empty recipient, and the only legitimate publisher fills
+  the id from claims, so an empty one means a hand-crafted message — not a reason to lose the post.
+- The consumer keeps the mirror of the bot's shape: `ArgumentNullException` guard, map the wire record onto
+  one command, dispatch through `ISender`, log a failed `Result` and acknowledge, let an unexpected
+  exception propagate. **No manual nack path** — a payload MassTransit cannot deserialise never reaches the
+  class (the transport moves it to `stock-quote-responses_error`), and a delivery this class throws on is
+  retried 4 times ~2 s apart and then moved to the same queue (measured in 1.10).
+Unit tests (36 new cases; suite **503 passing**, all offline):
+- `Application/Features/Messages/PostBotMessageHandlerTests` (21):
+  `Handle_BotMessage_PersistsWithBotAuthorAndBroadcasts`,
+  `Handle_BotMessage_IsOwnedByTheWellKnownBotAuthorAndNotByTheRequester` (asserts the *row*'s author is
+  `MessageAuthor.Bot` and its origin `MessageOrigin.Bot`, not just what the browser renders),
+  `Handle_Always_PostsTheBotsTextVerbatim` (`[Theory]` over all three of the bot's sentences),
+  `Handle_UnknownRoom_ReturnsFailureWithoutBroadcast`, `Handle_LookupFailed_AlertsTheRequesterOnly`,
+  `Handle_LookupFailed_StillPostsTheAnswerToTheRoom`, `Handle_SymbolNotFound_RaisesNoAlert`,
+  `Handle_Quoted_RaisesNoAlert`, `Handle_LookupFailedWithoutARequester_PostsTheAnswerAndRaisesNoAlert`
+  (`[Theory]`), `Handle_BotMessage_CommitsBeforeBroadcasting`, `Handle_SaveFails_DoesNotBroadcastOrAlert`,
+  `Handle_BroadcastFails_ReturnsAFailureInsteadOfAskingForARedelivery`,
+  `Handle_AlertFails_ReturnsAFailureInsteadOfAskingForARedelivery`,
+  `Handle_HostStopsDuringTheBroadcast_PropagatesTheCancellation`,
+  `Handle_TextTooLongForTheDomain_ReturnsFailureWithoutPersistingOrBroadcasting`,
+  `Handle_EmptyText_ReturnsFailureWithoutPersisting` (`[Theory]`),
+  `Handle_DomainFactoryFails_DoesNotPersistOrBroadcast`,
+  `Handle_Always_ForwardsTheCancellationTokenToEveryCall`, `Handle_NullCommand_Throws`,
+  `Handler_IsMarkedAsAWebFeature_SoChatWebRegistersIt`.
+- `Application/Features/Messages/PostBotMessageRegistrationTests` (3):
+  `AddApplication_RegistersTheInternalCommandHandler`,
+  `Send_ResolvedAnswer_PostsAsTheBotAndBroadcastsThroughThePipeline`,
+  `Send_FailedLookup_AlsoRaisesTheOutageAlertThroughThePipeline`.
+- `Web/StockQuoteResponseConsumerTests` (12): `Consume_StockQuoteResolved_DispatchesThePostBotMessageCommand`,
+  `Consume_Always_PassesTheBotsTextAndOutcomeThrough` (`[Theory]` over all three outcomes),
+  `Consume_Always_ForwardsTheConsumeCancellationToken`,
+  `Consume_PostFails_AcknowledgesInsteadOfFaultingTheDelivery`,
+  `Consume_UseCaseThrows_LetsTheDeliveryFaultSoTheTransportRetriesAndDeadLetters`,
+  `Consume_NullContext_Throws`, `Consume_PublishedAnswer_ReachesTheConsumerOnTheResponseQueue`
+  (in-memory `ITestHarness`: asserts the input-queue address is `stock-quote-responses` and that the
+  delivery did not fault).
+**Verified** against the running stack — the full mandatory flow, two authenticated SignalR clients
+(`alice@example.com` and `bob@example.com`, cookies from the real Identity login), both hosts up:
+- `Chat.Web` logs `Configured endpoint stock-quote-responses, Consumer: Chat.Web.Messaging.StockQuoteResponseConsumer`,
+  and the queue 1.15 could not find now exists: `stock-quote-responses durable=True state=running
+  consumers=1 messages=0`, alongside `stock-quote-requests`. No `_error` and no `_skipped` queue was created.
+- Alice sent `/stock=aapl.us`. **Both** connections received one `ReceiveMessage` with
+  `authorDisplayName='Bot'`, `origin=2` and the same message id
+  (`019fd2eb-a3ff-7bf0-b4cc-414c76164420`), content
+  `"I could not reach the quote service, so I have no price for AAPL.US right now."` —
+  the `LookupFailed` path 1.14 predicted (bot log: `Stooq answered 404 for aapl.us` →
+  `Resolved aapl.us for request 019fd2eb-9f5a-730b-94db-751ffac182d5 as LookupFailed.`).
+- `ReceiveAlert` frames: **alice 1, bob 0** — severity `2`, the `QuoteServiceUnavailable` wording. The banner
+  reached the participant who asked and nobody else.
+- SQL: `SELECT COUNT(*) FROM Messages WHERE Content LIKE '/%'` → **0**, while the answer *is* a row —
+  `system:bot | Bot | Origin 2 | 2026-08-05 17:14:46.1428157`. A third connection joining afterwards read it
+  back from the history exactly once, so a refresh keeps the answer.
+- `/health` **200** on both hosts (`sql-server`, `rabbitmq`, `masstransit-bus`; bot also `stooq`), zero
+  unhandled exceptions in either log — the only warnings are the pre-existing "Failed to determine the https
+  port" of a plain-HTTP dev run and `StooqClient`'s own `404` line.
+- Cleanup: the bot's probe row was deleted (`Messages` empty again, `ChatRooms` still 1, both user accounts
+  left in place for 1.18).
 
 ### [ ] 1.17 Add the integration test suite
 Files: `tests/Chat.IntegrationTests/{CustomWebApplicationFactory.cs,...}`

@@ -169,7 +169,7 @@ interface.
 | --- | --- | --- | --- |
 | `Features/Messages/PostMessage` | `PostMessageCommand(ChatRoomId, RawInput, AuthorUserId, AuthorDisplayName)` | `Result<PostMessageOutcome>` | The branch point of the whole challenge (see §5) |
 | `Features/Messages/GetLatestMessages` | `GetLatestMessagesQuery(ChatRoomId, Count = 50)` | `Result<IReadOnlyList<MessageDto>>` | |
-| `Features/Messages/PostBotMessage` | `PostBotMessageCommand(ChatRoomId, Text)` | `Result` | Invoked by the Web-side broker consumer |
+| `Features/Messages/PostBotMessage` | `PostBotMessageCommand(ChatRoomId, Text, RequestedByUserId, Outcome)` | `Result` | Invoked by Chat.Web's response consumer. Posts the bot's text verbatim and raises the outage alert (§5) |
 | `Features/StockCommands/RequestStockQuote` | `RequestStockQuoteCommand(ChatRoomId, StockCode, RequestedByUserId, RequestedByDisplayName)` | `Result` | Publishes to RabbitMQ. **No repository dependency at all** |
 
 `PostMessageOutcome` is an enum (`Posted` / `QuoteRequested`), not a response DTO. The broadcast has
@@ -321,7 +321,9 @@ Browser                Chat.Web                        RabbitMQ                 
    │                        │ PostBotMessageCommand
    │                        ▼
    │                    Message.PostByBot -> repo.Add + SaveChanges
-   │  ◀── ReceiveMessage ── IChatNotifier.BroadcastAsync(roomId, botMessage)
+   │  ◀── ReceiveMessage ── IChatNotifier.BroadcastMessageAsync(roomId, botMessage)   [the room's group]
+   │  ◀── ReceiveAlert ──── IChatNotifier.NotifyAlertAsync(requester, QuoteServiceUnavailable)
+   │                        only when Outcome == LookupFailed; the requester alone
 ```
 
 **The "never persist the stock command" rule is enforced by structure, in four layers:**
@@ -350,6 +352,30 @@ broadcast. Rationale: the challenge says "the post owner should be the bot", i.e
 reviewer who refreshes the page after a `/stock=` would otherwise see the quote disappear, which reads as a
 bug. The hard constraint only forbids persisting the **command**, not the answer. This overrides the
 "broadcast-only" default in the `ddd-patterns` skill and is repeated in the README design-decisions section.
+
+Task 1.16 kept that decision for **all three** outcomes, including `LookupFailed`. Not persisting an outage
+answer was considered — it would keep a third-party failure out of the room's permanent history — but it
+would also mean the answer a participant just read vanishes on their next refresh, which is exactly the
+"reads as a bug" behaviour the decision above exists to avoid. The transient nature of the failure is
+carried by `ChatAlert.QuoteServiceUnavailable`, which is *not* persisted and never appears in the last-50
+history, so the two channels say different things on purpose: the post is what the bot answered, the banner
+is the state of the system.
+
+### Idempotency of the bot's answer
+
+`stock-quote-responses` is an at-least-once channel, so the same `StockQuoteResolved` can be delivered
+twice. The only step that can duplicate a row is a failure **after** the commit, because everything before
+it leaves the store untouched — so `PostBotMessageHandler` converts a failed broadcast or alert into
+`PostBotMessageCommand.Errors.NotAnnounced` instead of letting it throw. The consumer acknowledges a failed
+`Result` (the rule set in 1.15), so the delivery is not retried: the post already exists, and connections
+that missed the push read it back from the room history on their next join. A duplicate row is permanent, a
+missed push is not.
+
+Two windows remain open, deliberately: a `SaveChangesAsync` that commits and then fails to report, and the
+host stopping between the commit and the transport's ack. Closing either needs a persisted idempotency key —
+a `RequestId` column on `Messages` with a unique index — which would put a broker correlation id inside a
+domain aggregate whose identity has nothing to do with one, for a single-instance deliverable in which
+neither window has been observed. Recorded rather than hidden.
 
 ### Unknown / malformed commands
 

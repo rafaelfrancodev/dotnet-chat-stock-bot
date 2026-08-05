@@ -3,9 +3,11 @@ using Chat.Application.Abstractions.Hosting;
 using Chat.Application.Abstractions.Realtime;
 using Chat.Infrastructure;
 using Chat.Infrastructure.HealthChecks;
+using Chat.Infrastructure.Messaging;
 using Chat.Infrastructure.Persistence;
 using Chat.Web.Hubs;
 using Chat.Web.Identity;
+using Chat.Web.Messaging;
 using Chat.Web.Realtime;
 
 WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
@@ -15,7 +17,13 @@ WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
 builder.Services.AddApplication<IWebFeature>();
 builder.Services.AddSystemClock();
 builder.Services.AddPersistence(builder.Configuration);
-builder.Services.AddMessaging(builder.Configuration);
+// The response consumer is what creates the stock-quote-responses queue and its binding: until it is
+// registered the bot's answers are published to an exchange with no route and RabbitMQ discards them.
+// The extension — never AddConsumer<T>() — pins the endpoint to MessagingConstants' name rather than one
+// derived from the consumer's class name.
+builder.Services.AddMessaging(
+    builder.Configuration,
+    configurator => configurator.AddStockQuoteResponseConsumer<StockQuoteResponseConsumer>());
 
 // Registration, login and logout come from Identity's default UI over the same ChatDbContext.
 builder.Services.AddChatIdentity(requireSecureCookie: !builder.Environment.IsDevelopment());
