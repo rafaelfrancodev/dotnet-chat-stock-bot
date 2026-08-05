@@ -1,3 +1,4 @@
+using Chat.Application.Contracts.Rooms;
 using Chat.Domain.ChatRooms;
 
 namespace Chat.Application.Abstractions.Persistence;
@@ -27,4 +28,16 @@ public interface IChatRoomRepository
     /// <param name="chatRoomId">Room to look for.</param>
     /// <param name="cancellationToken">Cancels the query.</param>
     Task<bool> ExistsAsync(ChatRoomId chatRoomId, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Finds a room by its name, or <see langword="null"/> when no room carries it. The chat page uses
+    /// this to resolve the room it opens on; the multiple-rooms bonus reuses it to reject duplicates.
+    /// </summary>
+    /// <remarks>
+    /// Returns a projection, not the aggregate: this is a read path, and the caller renders a name and
+    /// an identifier. Implementations must let the unique index on the name serve the lookup.
+    /// </remarks>
+    /// <param name="name">Room name to look for. Already normalised by the value object.</param>
+    /// <param name="cancellationToken">Cancels the query.</param>
+    Task<ChatRoomDto?> FindByNameAsync(RoomName name, CancellationToken cancellationToken = default);
 }

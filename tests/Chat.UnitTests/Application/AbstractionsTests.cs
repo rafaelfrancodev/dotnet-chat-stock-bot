@@ -129,6 +129,7 @@ public sealed class AbstractionsTests
         [
             "IChatNotifier.BroadcastMessageAsync",
             "IChatRoomRepository.ExistsAsync",
+            "IChatRoomRepository.FindByNameAsync",
             "IMessageRepository.GetLatestAsync",
             "IStockQuoteProvider.GetQuoteAsync",
             "IStockQuoteRequester.RequestAsync",

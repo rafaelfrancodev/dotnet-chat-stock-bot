@@ -24,9 +24,11 @@ public sealed class ChatDbSeeder(ChatDbContext context, IDateTimeProvider clock,
 {
     /// <summary>
     /// Name of the room every participant lands in. The challenge needs exactly one room; the
-    /// multiple-rooms bonus adds more next to it rather than replacing it.
+    /// multiple-rooms bonus adds more next to it rather than replacing it. The literal itself lives in
+    /// the domain, because the chat page resolves the same room by the same name — two copies could
+    /// drift and leave the window with nothing to join.
     /// </summary>
-    public const string DefaultRoomName = "General";
+    public const string DefaultRoomName = ChatRoomConstants.DefaultRoomName;
 
     /// <summary>Applies pending migrations, then seeds the default room.</summary>
     /// <param name="cancellationToken">Cancels the startup work, e.g. when the host is shutting down.</param>

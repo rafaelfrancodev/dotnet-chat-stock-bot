@@ -1,4 +1,6 @@
 @page
+@using Chat.Domain.Messages
+@using Chat.Web.Hubs
 @model ChatModel
 @{
     ViewData["Title"] = "Chat";
@@ -6,5 +8,35 @@
 
 <h1>@ViewData["Title"]</h1>
 
-<p>You are signed in as <strong>@Model.DisplayName</strong>.</p>
-<p class="text-muted">The message history and the live connection are added next.</p>
+@* Every value here is written by Razor, which HTML-encodes it. Message text is never rendered on the
+   server at all: the client appends it with textContent. *@
+@if (Model.Room is null)
+{
+    <p class="text-danger">
+        No chat room is available yet. Start the application once with the database reachable so the
+        default room is created.
+    </p>
+}
+else
+{
+    <p>Signed in as <strong>@Model.DisplayName</strong> in <strong>@Model.Room.Name</strong>.</p>
+
+    <div id="chat" data-room-id="@Model.Room.Id" data-hub-url="@ChatHub.Route">
+        <ul id="chat-messages" class="list-unstyled border rounded p-2 mb-2 overflow-auto" style="height: 24rem"></ul>
+
+        <form id="chat-form" class="d-flex gap-2">
+            <label class="visually-hidden" for="chat-input">Message</label>
+            <input id="chat-input" class="form-control" type="text" autocomplete="off"
+                   maxlength="@MessageConstants.MaxContentLength"
+                   placeholder="Type a message, or /stock=aapl.us" />
+            <button class="btn btn-primary" type="submit">Send</button>
+        </form>
+
+        <p id="chat-status" class="text-muted small mt-2" role="status"></p>
+    </div>
+}
+
+@section Scripts {
+    <script src="~/lib/signalr/dist/browser/signalr.min.js"></script>
+    <script src="~/js/chat.js" asp-append-version="true"></script>
+}

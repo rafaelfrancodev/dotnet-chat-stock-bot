@@ -590,13 +590,83 @@ Unit tests (`tests/Chat.UnitTests/Web/`, 24 cases):
 - `SELECT COUNT(*) FROM Messages WHERE Content LIKE '/%'` → **0** after all of it: neither the stock
   command nor the unknown command reached the table.
 
-### [ ] 1.13 Add the minimal chat page
-Files: `src/Chat.Web/Pages/Chat.cshtml(.cs)`, `src/Chat.Web/wwwroot/js/chat.js`
-Acceptance:
-- Loads the last 50 messages oldest→newest, then appends live ones.
-- Vanilla JS + the SignalR client; messages rendered with `textContent` (no `innerHTML`, no `Html.Raw`).
-- No SPA framework, no build step.
-Unit tests: none (UI). Manual check: two browsers, two users, both see each other's messages.
+### [x] 1.13 Add the minimal chat page
+Files: `src/Chat.Web/Pages/Chat.cshtml(.cs)`, `src/Chat.Web/wwwroot/js/chat.js`, `src/Chat.Web/libman.json`,
+`src/Chat.Web/wwwroot/lib/signalr/*`, `.config/dotnet-tools.json`,
+`src/Chat.Domain/ChatRooms/ChatRoomConstants.cs`, `src/Chat.Application/Contracts/Rooms/ChatRoomDto.cs`,
+`src/Chat.Application/Features/Rooms/GetDefaultRoom/*`,
+`src/Chat.Application/Abstractions/Persistence/IChatRoomRepository.cs`,
+`src/Chat.Infrastructure/Persistence/{ChatDbSeeder.cs,Repositories/ChatRoomRepository.cs}`
+Acceptance: all met — see the verification below.
+Decisions taken here (later tasks must conform):
+- **The page gets its room id from a use case, not from the database.** `IChatRoomRepository` only had
+  `Add` and `ExistsAsync`, so the room the window opens on was unreachable without either querying
+  `ChatDbContext` from a Razor page (breaking the dependency rule) or hard-coding a GUID. Added instead:
+  `GetDefaultRoomQuery` → `GetDefaultRoomHandler` (`IWebFeature`, or no host would register it) →
+  `IChatRoomRepository.FindByNameAsync(RoomName)` → `ChatRoomDto(Guid Id, string Name)` in
+  `Contracts/Rooms/`, for the same reason `MessageDto` is in `Contracts/Messages/`: a port and a query
+  result share it, and 2.2's `ListRooms` will be the third consumer. **2.2 must extend this folder
+  (`Features/Rooms/`) rather than start a parallel one**, and should reuse `FindByNameAsync` for
+  duplicate-name detection instead of adding a second lookup.
+- **The query takes no parameter.** Letting the browser name the room it wants would put a
+  client-supplied lookup key into a read path for no benefit; choosing between rooms is the bonus, which
+  adds a listing query next to this one rather than widening it.
+- **The default room name moved to `Chat.Domain/ChatRooms/ChatRoomConstants.DefaultRoomName`** and
+  `ChatDbSeeder.DefaultRoomName` now forwards to it. Two sides depend on the literal agreeing — startup
+  creates that room, the page looks it up — and a second copy would silently produce an empty window.
+- **`FindByNameAsync` returns a projection built the same way as the "last 50" query**: an internal
+  `RoomByNameQuery` composed once (so a test can assert its SQL with `ToQueryString()`) selecting into
+  `ChatRoomRow`, because EF Core still cannot translate `room.Name.Value`. Measured on the running host:
+  `SELECT TOP(1) [c].[Id], [c].[Name] FROM [ChatRooms] AS [c] WHERE [c].[Name] = @name`.
+- **The SignalR JavaScript client is vendored, not fetched from a CDN.** `libman.json` (provider
+  `unpkg`) pins `@microsoft/signalr@10.0.11` — MIT, zero npm advisories, same major as the server — into
+  `wwwroot/lib/signalr/`, and the files are committed so a clean clone works offline and a reviewer
+  behind a proxy still gets a working page. `Microsoft.Web.LibraryManager.Cli` 3.0.114 (MIT, Microsoft)
+  joined `.config/dotnet-tools.json` with `rollForward: true` (it targets `net8.0`), so `dotnet libman
+  restore` is reproducible. `LICENSE.txt` sits beside the vendored files, as it does for jquery.
+- **No `innerHTML`, no `Html.Raw`, no server-rendered message text at all.** The history arrives over the
+  hub, and `chat.js` builds each row from `createElement` + `textContent` + `createTextNode`. The only
+  values Razor writes are the room id, the room name and the display name, all HTML-encoded by default.
+- **The page renders nothing on a successful send** (1.12's decision) and de-duplicates by
+  `MessageDto.Id`, because `JoinRoom` subscribes before reading history. `onreconnected` re-joins, which
+  also re-reads whatever the connection missed.
+- The room id in a data attribute is the *only* room the script can name, and the author is never on the
+  wire, so the send box cannot choose an author or a room the connection did not join.
+- `ChatModel` takes `ISender` and one `OnGetAsync(CancellationToken)` — bound to `RequestAborted` by the
+  framework. A missing room is rendered as an explanation, not an exception: the window then opens no
+  connection instead of joining something that cannot exist.
+Unit tests (19 new cases; the plan said "none (UI)", but everything added server-side is testable):
+- `Application/Features/Rooms/GetDefaultRoomHandlerTests` (6): `Handle_SeededRoom_ReturnsItUntouched`,
+  `Handle_Always_LooksUpTheNameTheSeederCreates`, `Handle_UnseededDatabase_ReturnsTheSharedNotFoundFailure`,
+  `Handle_Always_ForwardsTheCancellationToken`, `Handle_NullQuery_Throws`, `DefaultRoomName_IsAValidRoomName`.
+- `Application/Features/Rooms/GetDefaultRoomRegistrationTests` (2): `AddApplication_RegistersTheInternalQueryHandler`,
+  `Send_SeededRoom_ReachesTheHandlerThroughThePipeline`.
+- `Infrastructure/Persistence/ChatRoomRepositoryTests` (5): `RoomByNameQuery_FiltersInTheDatabase_AndSelectsOnlyWhatIsRendered`
+  (SQL Server provider, no connection), plus SQLite round trips
+  `FindByNameAsync_ExistingRoom_ReturnsItsIdentifierAndName`, `FindByNameAsync_UnknownName_ReturnsNull`,
+  `FindByNameAsync_DifferentlySpacedName_MatchesTheStoredRoom`, `FindByNameAsync_NullName_Throws`.
+- `Web/ChatModelTests` (6): `OnGetAsync_SeededRoom_ExposesTheRoomThePageRenders`,
+  `OnGetAsync_UnseededDatabase_ExposesNoRoomInsteadOfFailing`,
+  `OnGetAsync_Always_ForwardsTheRequestCancellationToken`,
+  `DisplayName_SignedInParticipant_ComesFromTheClaimsAndNotTheRequest`,
+  `DisplayName_TicketWithoutADisplayNameClaim_FallsBackToTheUserName`, `Page_RequiresAnAuthenticatedVisitor`.
+- `AbstractionsTests.Ports_ExposeTheAsynchronousSurfaceTheRulesAreMeantToCover` gained
+  `IChatRoomRepository.FindByNameAsync`, which is what opts the new port method into the async and
+  cancellation rules. Suite: **379 passing**.
+**Verified** against the running stack (both hosts up, `/health` 200 on each, no unhandled exception in
+either log — only the pre-existing "Failed to determine the https port" warning of a plain-HTTP dev run):
+- `bob@example.com` / "Bob Brown" registered through the real Register page → `302 -> /Chat`.
+- Authenticated `GET /Chat` → **200**, carrying
+  `<div id="chat" data-room-id="019fcf15-c0ad-75df-979c-dcbd7b8c5317" data-hub-url="/hubs/chat">`,
+  `<script src="/lib/signalr/dist/browser/signalr.min.<hash>.js">` and `<script src="/js/chat.<hash>.js">`;
+  the HTML mentions no `cdn`/`unpkg`/`jsdelivr` host.
+- Two authenticated SignalR clients (one per user, the reviewer's two browsers): Alice's line reached
+  Bob's connection and her own, Bob's reached Alice's and his own, each exactly once, same message ids.
+- `/stock=aapl.us` from Alice produced **0** broadcast frames on either connection, and
+  `SELECT COUNT(*) FROM Messages WHERE Content LIKE '/%'` → **0**.
+- A third connection joining afterwards received both posts once, oldest first, with UTC timestamps.
+- Cleanup: the two probe messages were deleted (`Messages` is empty again, `ChatRooms` still 1). The
+  `bob@example.com` account was left in place deliberately — 1.18's two-browser run needs a second user.
 
 ### [ ] 1.14 Add the Stooq client and CSV parser
 Files: `src/Chat.Infrastructure/Stocks/{StooqOptions,StooqClient,StooqCsvParser}.cs`
