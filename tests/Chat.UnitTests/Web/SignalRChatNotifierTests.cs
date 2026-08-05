@@ -1,4 +1,5 @@
 using Chat.Application.Contracts.Messages;
+using Chat.Application.Contracts.Realtime;
 using Chat.Domain.ChatRooms;
 using Chat.Domain.Messages;
 using Chat.Web.Hubs;
@@ -71,5 +72,77 @@ public sealed class SignalRChatNotifierTests : IDisposable
         Func<Task> broadcast = () => new SignalRChatNotifier(_hubContext).BroadcastMessageAsync(RoomId, null!);
 
         await broadcast.Should().ThrowAsync<ArgumentNullException>();
+    }
+
+    [Fact]
+    public async Task NotifyAlertAsync_Always_SendsOnlyToThatParticipantsConnections()
+    {
+        IClientProxy user = Substitute.For<IClientProxy>();
+        _clients.User("user-42").Returns(user);
+        ChatAlert alert = ChatAlert.QuoteServiceUnavailable;
+
+        await new SignalRChatNotifier(_hubContext).NotifyAlertAsync("user-42", alert);
+
+        _clients.Received(1).User("user-42");
+        await user.Received(1).SendCoreAsync(
+            ChatHub.ReceiveAlert,
+            Arg.Is<object?[]>(arguments => arguments!.Length == 1 && ReferenceEquals(arguments![0], alert)),
+            Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task NotifyAlertAsync_Always_ReachesNeitherTheRoomNorEveryConnection()
+    {
+        _clients.User(Arg.Any<string>()).Returns(Substitute.For<IClientProxy>());
+
+        await new SignalRChatNotifier(_hubContext)
+            .NotifyAlertAsync("user-42", ChatAlert.QuoteServiceUnavailable);
+
+        // An alert is one participant's business: broadcasting "somebody's lookup failed" to the room
+        // would be noise, and to every connection would be a privacy leak once rooms multiply.
+        _clients.DidNotReceive().Group(Arg.Any<string>());
+        _ = _clients.DidNotReceive().All;
+    }
+
+    [Fact]
+    public async Task NotifyAlertAsync_Always_ForwardsTheCancellationToken()
+    {
+        IClientProxy user = Substitute.For<IClientProxy>();
+        _clients.User(Arg.Any<string>()).Returns(user);
+
+        await new SignalRChatNotifier(_hubContext)
+            .NotifyAlertAsync("user-42", ChatAlert.QuoteServiceUnavailable, _cancellation.Token);
+
+        await user.Received(1).SendCoreAsync(
+            ChatHub.ReceiveAlert, Arg.Any<object?[]>(), _cancellation.Token);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public async Task NotifyAlertAsync_WithoutARecipient_Throws(string? userId)
+    {
+        Func<Task> notify = () => new SignalRChatNotifier(_hubContext)
+            .NotifyAlertAsync(userId!, ChatAlert.QuoteServiceUnavailable);
+
+        await notify.Should().ThrowAsync<ArgumentException>();
+    }
+
+    [Fact]
+    public async Task NotifyAlertAsync_NullAlert_Throws()
+    {
+        Func<Task> notify = () => new SignalRChatNotifier(_hubContext).NotifyAlertAsync("user-42", null!);
+
+        await notify.Should().ThrowAsync<ArgumentNullException>();
+    }
+
+    [Fact]
+    public void QuoteServiceUnavailable_IsAnErrorAndTellsTheParticipantToRetry()
+    {
+        ChatAlert alert = ChatAlert.QuoteServiceUnavailable;
+
+        alert.Severity.Should().Be(ChatAlertSeverity.Error, "the banner must render red");
+        alert.Message.Should().Contain("Stooq").And.Contain("try again");
     }
 }

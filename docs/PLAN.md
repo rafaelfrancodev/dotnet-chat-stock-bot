@@ -759,6 +759,25 @@ Unit tests (`tests/Chat.UnitTests/Infrastructure/Stocks/`, 47 cases; suite **426
 `/health/live` 200, `/health` 200 with `masstransit-bus`, `rabbitmq` and `stooq` all healthy, no
 unhandled exception. The bot still calls no `AddPersistence()`.
 
+### [x] 1.14a Tell the participant when the quote service is down
+Files: `src/Chat.Application/Contracts/Realtime/ChatAlert.cs`, `src/Chat.Application/Abstractions/Realtime/IChatNotifier.cs`, `src/Chat.Web/Realtime/SignalRChatNotifier.cs`, `src/Chat.Web/Hubs/ChatHub.cs`, `src/Chat.Web/Pages/Chat.cshtml`, `src/Chat.Web/wwwroot/js/chat.js`
+
+1.14 measured that Stooq's `/q/l/` CSV endpoint now answers **404 with an HTML page**, so a reviewer's
+`/stock=` will take the `LookupFailed` path. A chat line saying so would scroll away among the messages;
+a participant needs to know the *system* is degraded and that retrying shortly is worth it.
+- `ChatAlert(Message, Severity)` with `ChatAlert.QuoteServiceUnavailable` — the wording lives in one
+  place so the page, the tests and 1.16 cannot disagree about it.
+- `IChatNotifier.NotifyAlertAsync(userId, alert, ct)` delivers it to **one participant's** connections via
+  `Clients.User(userId)` — not the room (somebody else's failed lookup is noise) and not `Clients.All`.
+  An alert is never persisted and never appears in the last-50 history, because it is not a post.
+- `ChatHub.ReceiveAlert` is the client method; `chat.js` renders a dismissible red banner
+  (`alert-danger` for `Severity.Error`, amber otherwise) with `textContent`, outside the message list.
+- The trigger is 1.16's to supply — see the "outage banner" block in that entry.
+Unit tests (`tests/Chat.UnitTests/Web/SignalRChatNotifierTests.cs`, 8 new): the alert reaches only that
+participant's connections, reaches neither the room nor every connection, forwards the cancellation
+token, rejects a missing recipient or alert, and `QuoteServiceUnavailable` really is an error-severity
+message naming Stooq and telling the participant to try again.
+
 ### [ ] 1.15 Implement the bot use case and worker
 Files: `src/Chat.Application/Features/StockCommands/ResolveStockQuote/*`, `src/Chat.Bot/StockQuoteRequestConsumer.cs`, `src/Chat.Bot/Program.cs`
 Acceptance:
@@ -792,7 +811,16 @@ Inherited from 1.10 (do not rediscover):
 - Dead-lettering needs no code: measured against the real broker, `Interval(3, 2s)` runs 4 attempts and
   then MassTransit moves the message to `<queue>_error`. Do not add a manual nack path.
 - Reuse `Chat.Application/Errors/ChatRoomErrors.NotFound` (promoted in 1.9) for the unknown-room failure.
-Unit tests: `Handle_BotMessage_PersistsWithBotAuthorAndBroadcasts`, `Handle_UnknownRoom_ReturnsFailureWithoutBroadcast`.
+Inherited from 1.14a — **the outage banner**:
+- When `StockQuoteResolved.Outcome == StockQuoteOutcome.LookupFailed`, also call
+  `IChatNotifier.NotifyAlertAsync(response.RequestedByUserId, ChatAlert.QuoteServiceUnavailable, ct)`.
+  The plumbing and the client rendering already exist; 1.16 only supplies the trigger.
+- `SymbolNotFound` does **not** raise an alert — an unknown ticker is a real answer from a working
+  service, so it stays a bot chat message. Only `LookupFailed` means "the provider is down, retry".
+- **`StockQuoteResolved` does not currently carry `RequestedByUserId`.** Add it to the contract (the
+  bot already receives it on `StockQuoteRequested`) so the alert can be aimed at the participant who
+  typed the command. Additive change; update the round-trip serialization test.
+Unit tests: `Handle_BotMessage_PersistsWithBotAuthorAndBroadcasts`, `Handle_UnknownRoom_ReturnsFailureWithoutBroadcast`, `Handle_LookupFailed_AlertsTheRequesterOnly`, `Handle_SymbolNotFound_RaisesNoAlert`.
 
 ### [ ] 1.17 Add the integration test suite
 Files: `tests/Chat.IntegrationTests/{CustomWebApplicationFactory.cs,...}`

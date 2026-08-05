@@ -22,6 +22,12 @@ else
     <p>Signed in as <strong>@Model.DisplayName</strong> in <strong>@Model.Room.Name</strong>.</p>
 
     <div id="chat" data-room-id="@Model.Room.Id" data-hub-url="@ChatHub.Route">
+        @* Hidden until the server sends an alert. The text is set by the client with textContent. *@
+        <div id="chat-alert" class="alert alert-danger d-none" role="alert" aria-live="assertive">
+            <span id="chat-alert-text"></span>
+            <button id="chat-alert-dismiss" type="button" class="btn-close float-end" aria-label="Dismiss"></button>
+        </div>
+
         <ul id="chat-messages" class="list-unstyled border rounded p-2 mb-2 overflow-auto" style="height: 24rem"></ul>
 
         <form id="chat-form" class="d-flex gap-2">

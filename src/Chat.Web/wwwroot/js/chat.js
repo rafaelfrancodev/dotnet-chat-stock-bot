@@ -21,6 +21,12 @@
     const form = document.getElementById("chat-form");
     const input = document.getElementById("chat-input");
     const status = document.getElementById("chat-status");
+    const alertBox = document.getElementById("chat-alert");
+    const alertText = document.getElementById("chat-alert-text");
+    const alertDismiss = document.getElementById("chat-alert-dismiss");
+
+    // Error = 2 in ChatAlertSeverity. Anything else is a warning and is rendered amber.
+    const SEVERITY_ERROR = 2;
 
     // JoinRoom subscribes before it reads the history, so a post committed in between legitimately
     // arrives twice. Ids are what settle it: a duplicate is dropped, and nothing is ever lost.
@@ -34,6 +40,26 @@
     function setStatus(text) {
         status.textContent = text;
     }
+
+    function hideAlert() {
+        alertBox.classList.add("d-none");
+        alertText.textContent = "";
+    }
+
+    // A system condition, not a post: it never enters the message list, so it cannot scroll away and is
+    // not part of the last-50 history. Text is curated server-side but still written with textContent.
+    function showAlert(alert) {
+        if (!alert || !alert.message) {
+            return;
+        }
+
+        alertText.textContent = alert.message;
+        alertBox.classList.toggle("alert-danger", alert.severity === SEVERITY_ERROR);
+        alertBox.classList.toggle("alert-warning", alert.severity !== SEVERITY_ERROR);
+        alertBox.classList.remove("d-none");
+    }
+
+    alertDismiss.addEventListener("click", hideAlert);
 
     function render(message) {
         if (!message || rendered.has(message.id)) {
@@ -72,6 +98,9 @@
 
     // Errors are sent to the caller alone and carry curated text only, so they are safe to show as-is.
     connection.on("ReceiveError", setStatus);
+
+    // Sent to this participant's connections only — for example when Stooq is unreachable.
+    connection.on("ReceiveAlert", showAlert);
 
     connection.onreconnecting(() => setStatus("Reconnecting…"));
     connection.onclose(() => setStatus("Disconnected. Reload the page to reconnect."));

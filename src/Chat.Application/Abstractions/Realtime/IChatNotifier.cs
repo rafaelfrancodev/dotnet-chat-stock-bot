@@ -1,4 +1,5 @@
 using Chat.Application.Contracts.Messages;
+using Chat.Application.Contracts.Realtime;
 using Chat.Domain.ChatRooms;
 
 namespace Chat.Application.Abstractions.Realtime;
@@ -21,5 +22,22 @@ public interface IChatNotifier
     Task BroadcastMessageAsync(
         ChatRoomId chatRoomId,
         MessageDto message,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Delivers a system condition to one participant — not to the room.
+    /// </summary>
+    /// <remarks>
+    /// Targeted rather than broadcast on purpose: the participant who typed <c>/stock=</c> is the one
+    /// waiting on an answer, and telling everyone else that somebody's lookup failed is noise. It is a
+    /// separate channel from <see cref="BroadcastMessageAsync"/> because an alert is not a post: it is
+    /// never persisted, never appears in the last-50 history, and is rendered as a banner.
+    /// </remarks>
+    /// <param name="userId">Authentication user id of the recipient, taken from server-side claims.</param>
+    /// <param name="alert">The curated alert. Must never contain participant-supplied text.</param>
+    /// <param name="cancellationToken">Cancels the delivery.</param>
+    Task NotifyAlertAsync(
+        string userId,
+        ChatAlert alert,
         CancellationToken cancellationToken = default);
 }

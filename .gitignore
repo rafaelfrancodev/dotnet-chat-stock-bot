@@ -56,6 +56,9 @@ CodeCoverage/
 TestResult.xml
 nunit-*.xml
 
+# Personal Claude Code permissions for local development. Not part of the deliverable.
+.claude/settings.local.json
+
 # Local secrets and environment overrides (challenge: keep confidential information secure)
 appsettings.*.Local.json
 appsettings.Local.json

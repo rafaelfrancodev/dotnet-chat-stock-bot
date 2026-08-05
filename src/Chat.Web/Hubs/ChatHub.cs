@@ -47,6 +47,13 @@ public sealed class ChatHub(ISender sender) : Hub
     /// </summary>
     public const string ReceiveError = "ReceiveError";
 
+    /// <summary>
+    /// Client-side method invoked with a <c>ChatAlert</c> when a system condition — rather than a chat
+    /// answer — needs the participant's attention, such as the quote service being unreachable. Sent to
+    /// one participant's connections, never to the room, and rendered as a banner instead of a post.
+    /// </summary>
+    public const string ReceiveAlert = "ReceiveAlert";
+
     /// <summary>Failures owned by the transport boundary itself.</summary>
     public static class Errors
     {

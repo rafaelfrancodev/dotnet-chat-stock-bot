@@ -128,6 +128,7 @@ public sealed class AbstractionsTests
         discovered.Should().BeEquivalentTo(
         [
             "IChatNotifier.BroadcastMessageAsync",
+            "IChatNotifier.NotifyAlertAsync",
             "IChatRoomRepository.ExistsAsync",
             "IChatRoomRepository.FindByNameAsync",
             "IMessageRepository.GetLatestAsync",
