@@ -668,18 +668,96 @@ either log — only the pre-existing "Failed to determine the https port" warnin
 - Cleanup: the two probe messages were deleted (`Messages` is empty again, `ChatRooms` still 1). The
   `bob@example.com` account was left in place deliberately — 1.18's two-browser run needs a second user.
 
-### [ ] 1.14 Add the Stooq client and CSV parser
-Files: `src/Chat.Infrastructure/Stocks/{StooqOptions,StooqClient,StooqCsvParser}.cs`
-Acceptance:
-- Typed `HttpClient` via `IHttpClientFactory`, 10 s timeout, standard resilience handler (retry + circuit breaker).
-- URL built only from a validated `StockCode`.
-- Parser handles: valid row → price from the `Close` column; `N/D` fields → `SymbolNotFound`; missing/short/garbage CSV → `LookupFailed`; invariant-culture decimal parsing.
-Unit tests (`tests/Chat.UnitTests/Infrastructure/Stocks/StooqCsvParserTests.cs`):
-- `Parse_ValidRow_ReturnsClosePrice`
-- `Parse_NotAvailableRow_ReturnsSymbolNotFound`
-- `Parse_HeaderOnly_ReturnsLookupFailed`
-- `Parse_MalformedRow_ReturnsLookupFailed` (`[Theory]`)
-- `Parse_CommaDecimalCulture_StillParsesInvariant`
+### [x] 1.14 Add the Stooq client and CSV parser
+Files: `src/Chat.Infrastructure/Stocks/{StooqClient,StooqCsvParser}.cs`,
+`src/Chat.Infrastructure/DependencyInjection.cs` (`AddStockQuotes` was a no-op stub)
+Acceptance: all met. `StooqOptions` already existed from 0.8 and was reused unchanged — one options type
+serves both the health probe and the quote client.
+Decisions taken here (later tasks must conform):
+- **The parser is a pure static type and the client only does HTTP.** `StooqCsvParser.Parse(string?)` is
+  the whole of the "understanding Stooq" logic, so every answer the service can give — a quote, `N/D`, a
+  truncated body, an HTML error page, prose — is covered by fast offline tests instead of a live call.
+- **The price is located by header name, never by position.** The column order is dictated by the `f=`
+  query parameter, so a positional read would silently start quoting the Low or the Volume if that
+  parameter were ever edited. A row whose field count disagrees with its header is `LookupFailed`.
+- **`N/D` in the `Close` field is `SymbolNotFound`; a non-numeric or non-positive close is `LookupFailed`.**
+  A zero or negative price is not something the room can act on — "$0.00 per share" is noise dressed up
+  as data.
+- `decimal.TryParse(..., NumberStyles.Float, CultureInfo.InvariantCulture, ...)`. `InvariantGlobalization`
+  is deliberately `false` in this solution, so the ambient culture is real: on de-DE a culture-sensitive
+  parse rejects `206.55` outright. The test asserts the chosen culture really disagrees first, so it
+  cannot pass vacuously.
+- **`StooqClient` never throws except for the caller's own cancellation.** A non-success status, a
+  transport error, a client timeout, an open circuit, an oversized body and an unusable body all become
+  `StockQuoteLookup.LookupFailed`, as `IStockQuoteProvider` requires. The distinction is one filter:
+  `exception is OperationCanceledException && cancellationToken.IsCancellationRequested`. An `HttpClient`
+  timeout also surfaces as `TaskCanceledException`, but with the caller's token unsignalled — so a
+  timeout is answered politely while a genuine cancellation propagates, instead of the bot posting
+  "could not look that up" into a room whose request was already abandoned.
+- **The catch is deliberately broad.** This is the boundary that converts a third party's failure modes
+  into the vocabulary the bot speaks; catching only `HttpRequestException` would let Polly's
+  `BrokenCircuitException` escape and break the port's contract (and would force a Polly reference here).
+  Logged at `Warning`: one line per failed `/stock=` command, not per chat message.
+- **The URL is built from `StooqOptions.BaseAddress` + `QuotePath` inside the client**, not from
+  `HttpClient.BaseAddress`, so the endpoint has exactly one source — the same way `StooqHealthCheck`
+  already probes `_options.BaseAddress` explicitly. `Uri.EscapeDataString` is applied to the code even
+  though `StockCode`'s allow-list makes it a no-op today, so widening the allow-list cannot turn this
+  line into an injection point. The client tests give the stubbed `HttpClient` no base address, so a URL
+  built anywhere else would not even be absolute.
+- **Measured, and it changed the design: `AddStandardResilienceHandler()` sets `HttpClient.Timeout` to
+  `Timeout.InfiniteTimeSpan`.** It appends its own client action, which overrides any earlier one
+  (probed: plain client `00:00:07`, same client with the handler `-00:00:00.001`, and re-applying
+  `ConfigureHttpClient` afterwards wins back `00:00:07`). So `StooqOptions.TimeoutSeconds` is applied as
+  the pipeline's `TotalRequestTimeout` — the framework's intent — rather than being forced back onto the
+  client, where it would only add a race able to abort a retry mid-flight. `AttemptTimeout` is that
+  budget divided by `StooqClient.MaxAttemptsPerLookup` (3), `Retry.MaxRetryAttempts` is 2 with a 250 ms
+  exponential base, and `CircuitBreaker.SamplingDuration` is raised if a generous configured timeout
+  would otherwise trip the handler's own `SamplingDuration >= 2 × AttemptTimeout` validation at startup.
+  The resilience options are named `StooqClient-standard` (client name + `-standard`, also measured).
+- `MaxResponseContentBufferSize = 64 KiB` bounds the buffered body: a quote row is ~70 bytes, and a
+  redirected or hostile endpoint must not be able to stream unbounded content into the bot's memory.
+- **Registered as a typed *and* named client** (`StooqClient.HttpClientName`), so `IHttpClientFactory`
+  owns one pooled handler per process and the registration, the resilience options and the tests all
+  name the same string. No collision with 0.8's `AddHttpClient<StooqHealthCheck>` — different names,
+  different clients, and the probe keeps its own plain 10 s timeout.
+- **Reality check for 1.15/1.18: the challenge's quote endpoint currently answers 404.** Measured
+  2026-08-05 from this machine: `GET https://stooq.com/q/l/?s=aapl.us&f=sd2t2ohlcv&h&e=csv` → **404**,
+  `Content-Type: text/html`, a 271-byte "The page you requested does not exist" page; identical for
+  `&e=csv` without `f=`, for `^spx` and `usdpln`, with and without a browser `User-Agent`, while
+  `https://stooq.com/` itself answers 200 (which is why `/health` still reports Stooq healthy) and
+  `/q/d/l/` answers with a JavaScript proof-of-work challenge. No live CSV sample could therefore be
+  captured; the documented format from the challenge PDF is what the parser and its tests pin. **Until
+  it recovers, the end-to-end demo will exercise the friendly `LookupFailed` path** — 1.15 must make
+  that wording presentable, and 1.18 must record which path it observed.
+Unit tests (`tests/Chat.UnitTests/Infrastructure/Stocks/`, 47 cases; suite **426 passing**, all offline):
+- `StooqCsvParserTests` (22): `Parse_ValidRow_ReturnsClosePrice`,
+  `Parse_ValidRow_ReadsThePriceFromTheCloseColumnAndNotTheNeighbouringOnes`,
+  `Parse_ReorderedColumns_StillReadsTheClosePrice`, `Parse_NotAvailableRow_ReturnsSymbolNotFound`,
+  `Parse_HeaderOnly_ReturnsLookupFailed`, `Parse_NoBody_ReturnsLookupFailed` (`[Theory]`, includes null),
+  `Parse_MalformedRow_ReturnsLookupFailed` (`[Theory]`, 8 cases including the real HTML error page),
+  `Parse_NonPositivePrice_ReturnsLookupFailed` (`[Theory]`),
+  `Parse_CommaDecimalCulture_StillParsesInvariant`, `PriceColumn_IsTheCloseColumnOfTheDocumentedHeader`.
+- `StooqClientTests` (17, stubbed `HttpMessageHandler`, host `quotes.invalid` so a bypassed stub fails
+  loudly instead of calling the real service): `GetQuoteAsync_ValidCsv_ReturnsTheClosingPrice`,
+  `GetQuoteAsync_Always_BuildsTheUrlFromTheOptionsAndTheValidatedCode`,
+  `GetQuoteAsync_UnknownSymbol_ReturnsSymbolNotFound`,
+  `GetQuoteAsync_NonSuccessStatus_ReturnsLookupFailed` (`[Theory]` 404/429/500/503),
+  `GetQuoteAsync_HtmlErrorPage_ReturnsLookupFailed`, `GetQuoteAsync_EmptyBody_ReturnsLookupFailed`,
+  `GetQuoteAsync_TransportFailure_ReturnsLookupFailed`, `GetQuoteAsync_Timeout_ReturnsLookupFailed`,
+  `GetQuoteAsync_UnexpectedTransportException_ReturnsLookupFailed` (`[Theory]`),
+  `GetQuoteAsync_CallerCancels_PropagatesTheCancellation`,
+  `GetQuoteAsync_Always_LinksTheCallersTokenToTheTransportCall`, `GetQuoteAsync_NullStockCode_Throws`.
+- `AddStockQuotesTests` (8): `AddStockQuotes_ResolvesTheQuoteProviderPort`,
+  `AddStockQuotes_BindsTheStooqSettingsFromConfiguration`,
+  `AddStockQuotes_ConfiguresTheTypedClientFromOptions`,
+  `AddStockQuotes_AppliesTheConfiguredTimeoutAsTheResilienceBudget`,
+  `AddStockQuotes_TransientFailure_IsRetriedWithinOneLookup` (a 500 really is retried to
+  `MaxAttemptsPerLookup` through the registered pipeline, then answered as `LookupFailed`),
+  `AddStockQuotes_SuccessfulLookup_IssuesExactlyOneRequest`,
+  `StooqOptions_Defaults_MatchTheChallengeEndpoint`, `AddStockQuotes_NullConfiguration_Throws`.
+**Verified:** `dotnet run --project src/Chat.Bot` still starts clean with the typed client registered —
+`/health/live` 200, `/health` 200 with `masstransit-bus`, `rabbitmq` and `stooq` all healthy, no
+unhandled exception. The bot still calls no `AddPersistence()`.
 
 ### [ ] 1.15 Implement the bot use case and worker
 Files: `src/Chat.Application/Features/StockCommands/ResolveStockQuote/*`, `src/Chat.Bot/StockQuoteRequestConsumer.cs`, `src/Chat.Bot/Program.cs`
