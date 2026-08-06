@@ -17,7 +17,7 @@ itself is never written to the database — only the bot's answer is.
 | Post owner is the bot | `Message.PostByBot` — takes no author, uses `MessageAuthor.Bot` |
 | Ordered by timestamp, last 50 only | `MessageRepository.GetLatestAsync`, capped in `GetLatestMessagesValidator` |
 | The stock command is never persisted | Enforced structurally in four layers — see [Design decisions](#design-decisions) |
-| Unit tests | 503 tests in `tests/Chat.UnitTests`, plus 11 in `tests/Chat.IntegrationTests` |
+| Unit tests | 514 tests in `tests/Chat.UnitTests`, plus 11 in `tests/Chat.IntegrationTests` |
 
 ---
 
@@ -194,9 +194,9 @@ job — consuming requests and answering politely — still works.
 dotnet test
 ```
 
-**517 tests, all passing** — 506 unit tests and 11 integration tests.
+**525 tests, all passing** — 514 unit tests and 11 integration tests.
 
-`tests/Chat.UnitTests` (506) is **hermetic**: no containers, no broker, no network access, about three
+`tests/Chat.UnitTests` (514) is **hermetic**: no containers, no broker, no network access, about three
 seconds. Database behaviour is covered by translating EF Core queries offline (`ToQueryString()`) and by
 SQLite in process memory where a real unique index is needed; messaging is covered by MassTransit's
 in-memory `ITestHarness`; Stooq is covered by a stubbed `HttpMessageHandler` pointed at a
@@ -337,8 +337,10 @@ Measured from this machine on **2026-08-05**:
 | the same URL with a desktop-browser `User-Agent` | **404**, `text/html` |
 | the same path on `https://stooq.pl/` | **404**, `text/html` |
 | `GET https://stooq.com/` | **200** |
-| `GET https://stooq.com/q/d/l/?s=aa.us` (daily history) | **200**, but `text/html` — a browser-verification page, not CSV |
+| `GET https://stooq.com/q/d/l/?s=aa.us&i=d` (daily history) | **200**, but `text/html` — a browser-verification page, not CSV |
 | the same, with a browser `User-Agent`, cookie jar and redirects followed | **200**, `text/html` — the same page |
+| the same, from a browser session that had already passed the check | **200**, CSV — `Date,Open,High,Low,Close,Volume` plus one line per session |
+| an unknown ticker, from that same verified session | **200**, body `Access denied` — *not* a 404 |
 
 Two separate things are going on.
 
@@ -352,12 +354,31 @@ does that automatically, which is why the download works interactively. An `Http
 challenge page instead. Solving that proof-of-work in the bot is not implemented: it exists specifically to
 keep automated clients out, so defeating it is not the right answer to a broken endpoint.
 
-What *is* implemented: `Stooq:QuotePath` now defaults to `q/d/l/?s={0}`, and `StooqCsvParser` understands
+What *is* implemented: `Stooq:QuotePath` defaults to `q/d/l/?s={0}&i=d`, and `StooqCsvParser` understands
 **both** response shapes — the single `Symbol,Date,Time,Open,High,Low,Close,Volume` row and the daily
 history's `Date,Open,High,Low,Close,Volume` with one line per session, from which it reads the **newest**
 row. So the moment the endpoint is reachable — from a network that is not challenged, if Stooq lifts the
 check, or through any endpoint you point `Stooq:BaseAddress` at — the quote path works with no code change.
 `IStockQuoteProvider` is the seam for swapping in a different provider entirely.
+
+**Stooq answers HTTP 200 for every one of those cases**, so the status code cannot classify them and the
+body has to. The mapping, which is what decides whether a participant sees a friendly answer or the red
+banner:
+
+| What arrived | Reported as | What the participant sees |
+| --- | --- | --- |
+| CSV with a `Close` column | `Quoted` | `AAPL.US quote is $93.42 per share` |
+| `200` + body `Access denied` | `SymbolNotFound` | `Sorry, I could not find a quote for AAPL.XX.` — no banner |
+| CSV whose newest row is truncated | `LookupFailed` | the outage line + banner (never an older session's close) |
+| `200` + an HTML page (verification or error) | `LookupFailed` | the outage line + banner |
+| `4xx` / `5xx`, transport error, timeout, open circuit | `LookupFailed` | the outage line + banner |
+
+The distinction matters: a mistyped ticker must not tell a participant that the whole service is down, and
+a service outage must not look like a ticker that does not exist. One caveat recorded honestly —
+`Access denied` is Stooq's wording and is ambiguous; a throttled client would plausibly see it too. It is
+read as "symbol not found" because that is the observed answer for a misspelled ticker, which is the case a
+participant actually hits. When it is not a quote, the bot logs the media type and the body's first line, so
+which case occurred is visible in the log.
 
 Consequence for a reviewer: `/stock=aapl.us` exercises the graceful-failure path rather than the quote
 path. The room gets `I could not reach the quote service, so I have no price for AAPL.US right now.`

@@ -1,3 +1,4 @@
+using Chat.Web.Hubs;
 using MassTransit;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
@@ -21,7 +22,15 @@ namespace Chat.IntegrationTests.Infrastructure;
 /// registration, so the topology under test is the shipped one — the real publisher adapters, the real
 /// consumer, on the endpoint names <c>MessagingConstants</c> pins — with nothing to connect to.
 /// </remarks>
-public sealed class ChatApplicationFactory : WebApplicationFactory<Program>
+/// <remarks>
+/// <para>
+/// The entry-point type parameter is <see cref="ChatHub"/> rather than <c>Program</c>: this project
+/// references both hosts, and each has its own top-level <c>Program</c> in the global namespace, so naming
+/// it would be ambiguous. <see cref="WebApplicationFactory{TEntryPoint}"/> only uses the type to find its
+/// assembly, so any public type from <c>Chat.Web</c> identifies the host just as precisely.
+/// </para>
+/// </remarks>
+public sealed class ChatApplicationFactory : WebApplicationFactory<ChatHub>
 {
     /// <summary>
     /// How long a bus assertion (<c>harness.Published.Any&lt;T&gt;()</c>) waits before failing. Bounded so

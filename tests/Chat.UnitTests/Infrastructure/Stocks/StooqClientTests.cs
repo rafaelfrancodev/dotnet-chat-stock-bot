@@ -67,6 +67,39 @@ public sealed class StooqClientTests
         lookup.Price.Should().BeNull();
     }
 
+    /// <summary>
+    /// The download path's real answer for a symbol it will not serve: the words "Access denied" with
+    /// HTTP <b>200</b>. Reported as a symbol that was not found, so a mistyped ticker does not tell the
+    /// participant the whole service is down.
+    /// </summary>
+    [Fact]
+    public async Task GetQuoteAsync_AccessDeniedWithASuccessStatus_ReturnsSymbolNotFound()
+    {
+        StooqClient client = Create(new StubHandler(Responds(HttpStatusCode.OK, "Access denied")));
+
+        StockQuoteLookup lookup = await client.GetQuoteAsync(Code("aavvf.uss"), CancellationToken.None);
+
+        lookup.Outcome.Should().Be(StockQuoteOutcome.SymbolNotFound);
+        lookup.Price.Should().BeNull();
+    }
+
+    /// <summary>The daily history read end to end through the client, newest session quoted.</summary>
+    [Fact]
+    public async Task GetQuoteAsync_DailyHistory_ReturnsTheNewestSessionsClose()
+    {
+        const string history =
+            "Date,Open,High,Low,Close,Volume\n"
+            + "2026-08-04,7.78,7.8,7.68,7.68,136000\n"
+            + "2026-08-05,7.51,7.71,7.5,7.69,1250\n";
+
+        StooqClient client = Create(new StubHandler(Responds(HttpStatusCode.OK, history)));
+
+        StockQuoteLookup lookup = await client.GetQuoteAsync(Code("aavvf.us"), CancellationToken.None);
+
+        lookup.Outcome.Should().Be(StockQuoteOutcome.Quoted);
+        lookup.Price.Should().Be(7.69m);
+    }
+
     [Theory]
     [InlineData(HttpStatusCode.NotFound)]
     [InlineData(HttpStatusCode.TooManyRequests)]

@@ -26,7 +26,7 @@ public sealed class StooqOptions
     /// README for the measurements and what that means for a reviewer.
     /// </para>
     /// </remarks>
-    public string QuotePath { get; init; } = "q/d/l/?s={0}";
+    public string QuotePath { get; init; } = "q/d/l/?s={0}&i=d";
 
     /// <summary>Request timeout applied to the typed HTTP client.</summary>
     public int TimeoutSeconds { get; init; } = 10;

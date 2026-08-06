@@ -59,6 +59,56 @@ public sealed class StooqCsvParserTests
         lookup.Price.Should().Be(47.69m, "the newest session closed at 47.69, not the first row's 46.20");
     }
 
+    /// <summary>
+    /// The real body captured from <c>/q/d/l/?s=aavvf.us&amp;i=d</c>, trimmed to its first and last
+    /// sessions. The quote is the last row's close, 7.69 — the first row's 7.84 is five months old.
+    /// </summary>
+    [Fact]
+    public void Parse_ARealDailyHistoryBody_QuotesTheLastSessionsClose()
+    {
+        string csv = string.Join(
+            '\n',
+            "Date,Open,High,Low,Close,Volume",
+            "2026-03-09,8,8.09,7.77,7.84,134600",
+            "2026-03-10,7.9,7.9,7.67,7.78,89100",
+            "2026-08-04,7.78,7.8,7.68,7.68,136000",
+            "2026-08-05,7.51,7.71,7.5,7.69,1250");
+
+        StockQuoteLookup lookup = StooqCsvParser.Parse(csv);
+
+        lookup.Outcome.Should().Be(StockQuoteOutcome.Quoted);
+        lookup.Price.Should().Be(7.69m);
+    }
+
+    /// <summary>
+    /// Stooq answers a symbol it will not serve with <c>Access denied</c> and HTTP <b>200</b>, so the
+    /// status code cannot tell a bad ticker from a broken service — the body has to. A participant who
+    /// mistyped a ticker must be told the symbol was not found, not that the service is down.
+    /// </summary>
+    [Theory]
+    [InlineData("Access denied")]
+    [InlineData("Access denied\n")]
+    [InlineData("access denied")]
+    [InlineData("  Access denied  ")]
+    public void Parse_AccessDeniedBody_ReturnsSymbolNotFound(string body)
+    {
+        StooqCsvParser.Parse(body).Outcome.Should().Be(StockQuoteOutcome.SymbolNotFound);
+    }
+
+    /// <summary>
+    /// The browser-verification page, by contrast, says nothing about the ticker: it means no client
+    /// without a solved challenge can read anything, which is the service being unusable.
+    /// </summary>
+    [Fact]
+    public void Parse_BrowserVerificationPage_ReturnsLookupFailed()
+    {
+        const string challenge =
+            "<!DOCTYPE html><html><head><meta charset=\"utf-8\"></head><body><noscript>This site requires "
+            + "JavaScript to verify your browser.</noscript><script>/* proof of work */</script></body></html>";
+
+        StooqCsvParser.Parse(challenge).Outcome.Should().Be(StockQuoteOutcome.LookupFailed);
+    }
+
     /// <summary>A history with a single session behaves like the single-quote response.</summary>
     [Fact]
     public void Parse_DailyHistoryWithOneSession_ReturnsThatClose()

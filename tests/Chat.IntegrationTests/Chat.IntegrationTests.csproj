@@ -19,12 +19,11 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!-- Chat.Web only, deliberately. Referencing Chat.Bot as well would put a second top-level
-         `Program` in scope (Chat.Bot grants this project InternalsVisibleTo), making
-         `WebApplicationFactory<Program>` an ambiguous reference. The suite hosts the web application;
-         the bot is covered by Chat.UnitTests over its consumer plus the manual end-to-end run in
-         task 1.18, and the broker contract between the two is exercised here through the bus. -->
+    <!-- Both hosts. Each has its own top-level `Program` in the global namespace, so nothing here may name
+         that type: ChatApplicationFactory identifies the web host by `WebApplicationFactory<ChatHub>`
+         instead, which resolves the same assembly without the ambiguity. -->
     <ProjectReference Include="..\..\src\Chat.Web\Chat.Web.csproj" />
+    <ProjectReference Include="..\..\src\Chat.Bot\Chat.Bot.csproj" />
   </ItemGroup>
 
 </Project>

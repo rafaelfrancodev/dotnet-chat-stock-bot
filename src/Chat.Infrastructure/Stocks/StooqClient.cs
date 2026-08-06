@@ -73,12 +73,20 @@ internal sealed class StooqClient(
             string csv = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
             StockQuoteLookup lookup = StooqCsvParser.Parse(csv);
 
-            if (lookup.Outcome == StockQuoteOutcome.LookupFailed)
+            // Stooq answers 200 whether it served a CSV, refused the symbol, or returned its
+            // browser-verification page, so the body is the only evidence of which happened. Log what
+            // arrived when it was not a quote: the media type and the first line identify the case at a
+            // glance without dumping a whole history into the log.
+            if (lookup.Outcome != StockQuoteOutcome.Quoted)
             {
                 logger.LogWarning(
-                    "Stooq returned a body for {StockCode} that carries no usable {PriceColumn} price.",
+                    "Stooq answered 200 for {StockCode} with {MediaType} that is not a usable {PriceColumn} "
+                    + "quote, reported as {Outcome}. First line: {FirstLine}",
                     stockCode.Value,
-                    StooqCsvParser.PriceColumn);
+                    response.Content.Headers.ContentType?.MediaType ?? "no media type",
+                    StooqCsvParser.PriceColumn,
+                    lookup.Outcome,
+                    FirstLineOf(csv));
             }
 
             return lookup;
@@ -111,6 +119,23 @@ internal sealed class StooqClient(
             Uri.EscapeDataString(stockCode.Value));
 
         return new Uri(_options.BaseAddress, path);
+    }
+
+    /// <summary>
+    /// The first line of a body, bounded, for a log message. Enough to tell "Access denied" from a
+    /// verification page from a CSV header, without writing a whole daily history into the log.
+    /// </summary>
+    private static string FirstLineOf(string body)
+    {
+        const int maxLoggedCharacters = 120;
+
+        ReadOnlySpan<char> trimmed = body.AsSpan().Trim();
+        int lineBreak = trimmed.IndexOfAny('\r', '\n');
+        ReadOnlySpan<char> firstLine = lineBreak < 0 ? trimmed : trimmed[..lineBreak];
+
+        return firstLine.Length <= maxLoggedCharacters
+            ? firstLine.ToString()
+            : string.Concat(firstLine[..maxLoggedCharacters], "…");
     }
 
     /// <summary>
