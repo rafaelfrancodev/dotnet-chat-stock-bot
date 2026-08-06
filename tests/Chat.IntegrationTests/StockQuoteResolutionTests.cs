@@ -17,145 +17,151 @@ namespace Chat.IntegrationTests;
 /// <summary>
 /// The bot half of the stock flow, wired the way <c>Chat.Bot</c> wires it: a published
 /// <see cref="StockQuoteRequested"/> reaches the real <c>StockQuoteRequestConsumer</c> on the endpoint
-/// <c>MessagingConstants</c> names, which dispatches the real handler, which calls the real
-/// <c>StooqClient</c> and publishes a real <see cref="StockQuoteResolved"/>.
+/// <c>MessagingConstants</c> names, which dispatches the real handler, which calls the real quote client
+/// and publishes a real <see cref="StockQuoteResolved"/>.
 /// </summary>
 /// <remarks>
+/// <b>Configured for Finnhub</b>, because that is the provider the application actually runs on: Stooq's
+/// CSV endpoint is no longer readable from a server. The Stooq adapter keeps its own unit tests, so both
+/// providers stay covered — this exercises the live path end to end.
+/// <para>
 /// <b>Only the network is substituted.</b> Everything between the broker and the HTTP boundary is the
-/// shipped code — the consumer, the MediatR pipeline, the typed client with its resilience handler, the CSV
-/// parser and the answer wording. Stooq itself is a stubbed <see cref="HttpMessageHandler"/>, because these
-/// tests exist to pin how a <i>given</i> response becomes an answer in the chat room; calling the live
-/// service would make them depend on a third party that currently cannot be reached at all.
+/// shipped code — the consumer, the MediatR pipeline, the typed client with its resilience handler, the
+/// JSON parser, the symbol translation and the answer wording. The response bodies are the real ones,
+/// captured from the live API, so this pins how a given response becomes a line in the chat room without
+/// depending on a third party at test time.
+/// </para>
 /// <para>
 /// No database and no container: the bot has neither, which is the point of it. So these are plain
-/// <c>[Fact]</c>s rather than <see cref="DockerFactAttribute"/>s and they run everywhere, and the class
-/// deliberately joins no collection so the SQL Server fixture is never started for them.
+/// <c>[Fact]</c>s rather than <see cref="DockerFactAttribute"/>s and they run everywhere.
 /// </para>
 /// </remarks>
 public sealed class StockQuoteResolutionTests
 {
-    /// <summary>The real body Stooq returns for <c>/q/d/l/?s=aavvf.us&amp;i=d</c>, trimmed to four sessions.</summary>
-    private const string DailyHistory =
-        "Date,Open,High,Low,Close,Volume\n"
-        + "2026-03-09,8,8.09,7.77,7.84,134600\n"
-        + "2026-07-31,7.85,8.11,7.82,7.86,113000\n"
-        + "2026-08-04,7.78,7.8,7.68,7.68,136000\n"
-        + "2026-08-05,7.51,7.71,7.5,7.69,1250\n";
+    /// <summary>A real Finnhub quote body, captured from the live API on 2026-08-06 for AAPL.</summary>
+    private const string QuoteBody =
+        """{"c":311.55,"d":0.55,"dp":0.1768,"h":316.2894,"l":309.23,"o":313.73,"pc":311,"t":1786038273}""";
 
-    /// <summary>What Stooq answers for a ticker it will not serve — with HTTP 200, not a 404.</summary>
-    private const string AccessDenied = "Access denied";
+    /// <summary>Finnhub's unknown-symbol answer: HTTP 200 with every number zero.</summary>
+    private const string UnknownSymbolBody =
+        """{"c":0,"d":null,"dp":null,"h":0,"l":0,"o":0,"pc":0,"t":0}""";
+
+    /// <summary>The transport is stubbed, so the key never has to be real — only present.</summary>
+    private const string ApiKey = "integration-test-key";
 
     [Fact]
-    public async Task StockQuoteRequested_WhenStooqReturnsADailyHistory_PublishesTheNewestSessionsClose()
+    public async Task StockQuoteRequested_WhenTheProviderAnswers_PublishesTheChallengesWording()
     {
-        await using Harness harness = await Harness.StartAsync(HttpStatusCode.OK, DailyHistory);
+        await using Harness harness = await Harness.StartAsync(HttpStatusCode.OK, QuoteBody);
 
-        StockQuoteResolved answer = await harness.ResolveAsync("aavvf.us");
+        StockQuoteResolved answer = await harness.ResolveAsync("aapl.us");
 
         answer.Outcome.Should().Be(StockQuoteOutcome.Quoted);
-        answer.Price.Should().Be(7.69m, "the newest session closed at 7.69");
+        answer.Price.Should().Be(311.55m, "c is the current price");
         answer.Message.Should().Be(
-            "AAVVF.US quote is $7.69 per share",
-            "this is the wording the challenge specifies, with the ticker in upper case");
+            "AAPL.US quote is $311.55 per share",
+            "this is the wording the challenge specifies, with the ticker upper-cased");
     }
 
     /// <summary>
-    /// Stooq refuses any client outside a verified browser session with "Access denied" and HTTP 200 —
-    /// measured for a valid ticker as well as a misspelled one, so it cannot be read as an unknown symbol.
+    /// The ticker reaches Finnhub in the form it expects: the chat's <c>aapl.us</c> becomes <c>AAPL</c>,
+    /// and the API key travels as a query parameter. Asserted on the request the client actually sent.
     /// </summary>
     [Fact]
-    public async Task StockQuoteRequested_WhenStooqRefusesTheRequest_PublishesLookupFailed()
+    public async Task StockQuoteRequested_Always_CallsTheProviderWithTheTranslatedSymbol()
     {
-        await using Harness harness = await Harness.StartAsync(HttpStatusCode.OK, AccessDenied);
+        await using Harness harness = await Harness.StartAsync(HttpStatusCode.OK, QuoteBody);
 
-        StockQuoteResolved answer = await harness.ResolveAsync("aavvf.us");
+        await harness.ResolveAsync("aapl.us");
 
-        answer.Outcome.Should().Be(StockQuoteOutcome.LookupFailed);
-        answer.Price.Should().BeNull();
-        answer.Message.Should().Be(
-            "I could not reach the quote service, so I have no price for AAVVF.US right now.");
+        harness.LastRequestUri.Should().NotBeNull();
+        harness.LastRequestUri!.AbsoluteUri.Should().Contain("symbol=AAPL").And.Contain($"token={ApiKey}");
     }
 
     /// <summary>
-    /// The genuine unknown-symbol signal is <c>N/D</c> inside a real CSV row, which is what the
-    /// single-quote path returns. That one does mean the ticker does not exist.
+    /// The case a participant hits by mistyping. It must be a friendly answer with no outage banner: the
+    /// service is working, the symbol simply does not exist.
     /// </summary>
     [Fact]
-    public async Task StockQuoteRequested_WhenTheCsvSaysNotAvailable_PublishesSymbolNotFound()
+    public async Task StockQuoteRequested_WhenTheSymbolIsUnknown_PublishesSymbolNotFound()
     {
-        const string notAvailable =
-            "Symbol,Date,Time,Open,High,Low,Close,Volume\nZZZZ.US,N/D,N/D,N/D,N/D,N/D,N/D,N/D\n";
+        await using Harness harness = await Harness.StartAsync(HttpStatusCode.OK, UnknownSymbolBody);
 
-        await using Harness harness = await Harness.StartAsync(HttpStatusCode.OK, notAvailable);
-
-        StockQuoteResolved answer = await harness.ResolveAsync("zzzz.us");
+        StockQuoteResolved answer = await harness.ResolveAsync("zzzznotreal.us");
 
         answer.Outcome.Should().Be(StockQuoteOutcome.SymbolNotFound);
-        answer.Message.Should().Be("Sorry, I could not find a quote for ZZZZ.US.");
+        answer.Price.Should().BeNull();
+        answer.Message.Should().Be("Sorry, I could not find a quote for ZZZZNOTREAL.US.");
     }
 
     /// <summary>
-    /// A real service failure, by contrast, is what the outage banner exists for — so it must arrive as
-    /// <see cref="StockQuoteOutcome.LookupFailed"/> and not as a symbol that does not exist.
+    /// A real service failure is what the outage banner exists for, so it must arrive as
+    /// <see cref="StockQuoteOutcome.LookupFailed"/> and never as a symbol that does not exist. 401 is in
+    /// the list because a rejected API key must not be reported to a participant as a bad ticker.
     /// </summary>
     [Theory]
+    [InlineData(HttpStatusCode.Unauthorized)]
+    [InlineData(HttpStatusCode.TooManyRequests)]
     [InlineData(HttpStatusCode.InternalServerError)]
-    [InlineData(HttpStatusCode.BadGateway)]
     [InlineData(HttpStatusCode.ServiceUnavailable)]
-    [InlineData(HttpStatusCode.NotFound)]
-    public async Task StockQuoteRequested_WhenStooqFails_PublishesLookupFailed(HttpStatusCode status)
+    public async Task StockQuoteRequested_WhenTheProviderFails_PublishesLookupFailed(HttpStatusCode status)
     {
-        await using Harness harness = await Harness.StartAsync(status, "<html>error</html>");
+        await using Harness harness = await Harness.StartAsync(status, """{"error":"nope"}""");
 
-        StockQuoteResolved answer = await harness.ResolveAsync("aavvf.us");
+        StockQuoteResolved answer = await harness.ResolveAsync("aapl.us");
 
         answer.Outcome.Should().Be(StockQuoteOutcome.LookupFailed);
         answer.Price.Should().BeNull();
         answer.Message.Should().Be(
-            "I could not reach the quote service, so I have no price for AAVVF.US right now.");
+            "I could not reach the quote service, so I have no price for AAPL.US right now.");
     }
 
-    /// <summary>
-    /// The browser-verification page Stooq currently serves to any HTTP client: HTTP 200, but HTML. It says
-    /// nothing about the ticker, so it is a failed lookup rather than an unknown symbol.
-    /// </summary>
+    /// <summary>An unreadable body is the service's problem, not a verdict on the ticker.</summary>
     [Fact]
-    public async Task StockQuoteRequested_WhenStooqServesItsBrowserCheck_PublishesLookupFailed()
+    public async Task StockQuoteRequested_WhenTheBodyIsNotJson_PublishesLookupFailed()
     {
-        const string challenge =
-            "<!DOCTYPE html><html><body><noscript>This site requires JavaScript to verify your browser."
-            + "</noscript><script>/* proof of work */</script></body></html>";
+        await using Harness harness = await Harness.StartAsync(HttpStatusCode.OK, "<html>gateway error</html>");
 
-        await using Harness harness = await Harness.StartAsync(HttpStatusCode.OK, challenge);
-
-        StockQuoteResolved answer = await harness.ResolveAsync("aavvf.us");
+        StockQuoteResolved answer = await harness.ResolveAsync("aapl.us");
 
         answer.Outcome.Should().Be(StockQuoteOutcome.LookupFailed);
     }
 
     /// <summary>
     /// The bot's composition root, minus the network: <c>AddApplication&lt;IBotFeature&gt;</c>, the clock,
-    /// the bus with the real request consumer on the real endpoint name, and <c>AddStockQuotes</c> with its
-    /// outermost HTTP handler replaced by a stub.
+    /// the bus with the real request consumer on the real endpoint name, and <c>AddStockQuotes</c>
+    /// configured for Finnhub with its outermost HTTP handler replaced by a stub.
     /// </summary>
     private sealed class Harness : IAsyncDisposable
     {
         private readonly ServiceProvider provider;
         private readonly ITestHarness bus;
+        private readonly StubHandler handler;
 
-        private Harness(ServiceProvider provider, ITestHarness bus)
+        private Harness(ServiceProvider provider, ITestHarness bus, StubHandler handler)
         {
             this.provider = provider;
             this.bus = bus;
+            this.handler = handler;
         }
+
+        /// <summary>The URL the quote client actually requested, for asserting symbol translation.</summary>
+        public Uri? LastRequestUri => handler.LastRequestUri;
 
         public static async Task<Harness> StartAsync(HttpStatusCode status, string body)
         {
-            IConfiguration configuration = new ConfigurationBuilder().Build();
+            // Selects the provider exactly as a deployment does, through configuration.
+            IConfiguration configuration = new ConfigurationBuilder()
+                .AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    [Chat.Infrastructure.DependencyInjection.StockQuoteProviderKey] =
+                        Chat.Infrastructure.DependencyInjection.FinnhubProvider,
+                    [$"{FinnhubOptions.SectionName}:{nameof(FinnhubOptions.ApiKey)}"] = ApiKey,
+                })
+                .Build();
+
             ServiceCollection services = [];
 
-            // Chat.Bot's own composition, in its own order. AddMessaging is what registers the responder
-            // the handler publishes through and the consumer on MessagingConstants' endpoint name.
             services.AddApplication<IBotFeature>();
             services.AddSystemClock();
             services.AddMessaging(
@@ -163,22 +169,19 @@ public sealed class StockQuoteResolutionTests
                 configurator => configurator.AddStockQuoteRequestConsumer<StockQuoteRequestConsumer>());
             services.AddStockQuotes(configuration);
 
-            // Replace only the transport, exactly as ChatApplicationFactory does for the web host: the
-            // consumer registrations, the publisher adapters and the endpoint names all survive, and
-            // nothing tries to reach RabbitMQ.
             services.AddMassTransitTestHarness(configurator =>
                 configurator.SetTestTimeouts(ChatApplicationFactory.BusTimeout, ChatApplicationFactory.BusTimeout));
 
-            // The typed client, its options, the resilience pipeline and the parser stay as registered;
-            // only the outermost handler is a stub, so no test can reach the live service.
-            services.AddHttpClient(StooqClient.HttpClientName)
-                .ConfigurePrimaryHttpMessageHandler(() => new StubHandler(status, body));
+            StubHandler handler = new(status, body);
+
+            services.AddHttpClient(FinnhubClient.HttpClientName)
+                .ConfigurePrimaryHttpMessageHandler(() => handler);
 
             ServiceProvider provider = services.BuildServiceProvider(validateScopes: true);
             ITestHarness bus = provider.GetRequiredService<ITestHarness>();
             await bus.Start();
 
-            return new Harness(provider, bus);
+            return new Harness(provider, bus, handler);
         }
 
         /// <summary>Publishes a request as Chat.Web would, and returns the answer the bot published.</summary>
@@ -197,11 +200,10 @@ public sealed class StockQuoteResolutionTests
             (await bus.Published.Any<StockQuoteResolved>()).Should().BeTrue(
                 "the bot must answer every request it accepts");
 
-            IPublishedMessage<StockQuoteResolved> published = bus.Published
+            return bus.Published
                 .Select<StockQuoteResolved>()
-                .First(message => message.Context.Message.RequestId == request.RequestId);
-
-            return published.Context.Message;
+                .First(message => message.Context.Message.RequestId == request.RequestId)
+                .Context.Message;
         }
 
         public async ValueTask DisposeAsync()
@@ -211,12 +213,18 @@ public sealed class StockQuoteResolutionTests
         }
     }
 
-    /// <summary>Answers every request with one canned response. Never reaches the network.</summary>
+    /// <summary>Answers every request with one canned response, and records what was asked.</summary>
     private sealed class StubHandler(HttpStatusCode status, string body) : HttpMessageHandler
     {
+        public Uri? LastRequestUri { get; private set; }
+
         protected override Task<HttpResponseMessage> SendAsync(
             HttpRequestMessage request,
-            CancellationToken cancellationToken) =>
-            Task.FromResult(new HttpResponseMessage(status) { Content = new StringContent(body) });
+            CancellationToken cancellationToken)
+        {
+            LastRequestUri = request.RequestUri;
+
+            return Task.FromResult(new HttpResponseMessage(status) { Content = new StringContent(body) });
+        }
     }
 }

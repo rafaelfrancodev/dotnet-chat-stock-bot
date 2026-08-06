@@ -101,12 +101,25 @@ public sealed class ChatServerFixture : IAsyncLifetime
         // carries it.
         broker = application.Services.GetRequiredService<ITestHarness>();
 
+        // AddMassTransitTestHarness takes over the bus lifecycle: it replaces MassTransit's hosted
+        // service, so starting the web host does NOT start the bus — the harness has to. Without this
+        // call the bus never starts and IPublishEndpoint.Publish blocks forever waiting for it, which is
+        // exactly the stall that only ever hit the three tests that publish (`SendMessage did not answer
+        // within 30 seconds`) while the plain-message, history and authentication tests always passed.
+        await broker.Start().ConfigureAwait(false);
+
         await GuardAgainstADeveloperDatabaseAsync(connectionString).ConfigureAwait(false);
     }
 
     /// <inheritdoc/>
     public async Task DisposeAsync()
     {
+        // Stopped before the host is torn down, because the harness owns the bus rather than the host.
+        if (broker is not null)
+        {
+            await broker.Stop().ConfigureAwait(false);
+        }
+
         if (application is not null)
         {
             await application.DisposeAsync().ConfigureAwait(false);

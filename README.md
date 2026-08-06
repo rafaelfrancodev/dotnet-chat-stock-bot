@@ -569,15 +569,28 @@ the UI to drive them; today the chat page always opens the seeded `General` room
 
 ## Known issues
 
-**The integration suite can stall intermittently when `dotnet test` is run at the repository root.**
-Roughly one run in four, three of the SignalR-based tests hang until their per-test backstop and the run
-reports three failures; the same tests pass in 16–24 seconds when the project is run on its own, and the
-cause has not been pinned down. If you hit it:
+**The integration suite can stall on the first run after a build.** When it happens, the three tests that
+publish to the message bus hang until their backstop and the run reports three failures with
+`SendMessage did not answer within 30 seconds`. **Running it again passes** — measured 19/19 in 18–27
+seconds on three consecutive runs after the failing first one. If you hit it, re-run:
 
 ```bash
-dotnet test tests/Chat.UnitTests           # 514, hermetic, ~3 s
-dotnet test tests/Chat.IntegrationTests    # 19, needs Docker, ~25 s
+dotnet test tests/Chat.UnitTests           # 531, hermetic, ~3 s
+dotnet test tests/Chat.IntegrationTests    # 19, needs Docker, ~20 s
 ```
+
+Two real causes were found and fixed along the way, which is why it went from frequent to a cold-start
+only: `AddMassTransitTestHarness` replaces MassTransit's hosted service, so building the host does **not**
+start the bus and the fixture has to call `harness.Start()` — without it a publish waited forever; and
+xUnit parallelises test *collections*, which put a second in-memory bus beside the collection that owns the
+SQL Server container, so `xunit.runner.json` now runs the assembly sequentially. A residual cold-start
+stall remains and is **not** claimed as understood. Every wait inside these tests is individually bounded
+and names what stalled — the hub connect, the invocation, or the push — so a recurrence reports where it
+stopped rather than only that the test ran out of time.
+
+Two traps worth knowing while diagnosing: an interrupted run can leave a `testhost` process holding the
+test DLLs, which makes the *build* fail with `MSB3027 … locked by testhost` — kill stray `testhost`
+processes; and a `dotnet run` left over from a previous session will hold port 5271 or 5299.
 
 Every wait inside those tests is individually bounded and names what stalled — the hub connect, the
 invocation, or the push — so a recurrence reports where it stopped rather than only that the test ran out

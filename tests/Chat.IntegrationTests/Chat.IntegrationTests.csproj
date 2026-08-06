@@ -19,6 +19,14 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- Runs the whole assembly sequentially. xUnit parallelises test *collections* by default, which put
+         a second in-memory bus and service provider alongside the collection that owns the SQL Server
+         container — and the three tests that publish then stalled while passing on their own. A suite that
+         owns shared infrastructure should not race itself. -->
+    <None Include="xunit.runner.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
     <!-- Both hosts. Each has its own top-level `Program` in the global namespace, so nothing here may name
          that type: ChatApplicationFactory identifies the web host by `WebApplicationFactory<ChatHub>`
          instead, which resolves the same assembly without the ambiguity. -->

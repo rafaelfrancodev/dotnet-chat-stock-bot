@@ -76,23 +76,11 @@ public sealed class ChatApplicationFactory : WebApplicationFactory<ChatHub>
         // like a wrong password. This is the same configuration as the documented local run on port 5271.
         builder.UseEnvironment(Environments.Development);
 
+        // The harness owns the bus lifecycle from here: it replaces MassTransit's hosted service, so
+        // ChatServerFixture must call harness.Start() — building the host is not enough.
         builder.ConfigureTestServices(services =>
-        {
             services.AddMassTransitTestHarness(configurator =>
-                configurator.SetTestTimeouts(BusTimeout, BusTimeout));
-
-            // Without this the host is "started" while the bus is still starting, because MassTransit's
-            // hosted service does not wait for it by default. A test that published in that window blocked
-            // until its own timeout — which is exactly the intermittent stall that only ever hit the three
-            // bus-dependent tests (`SendMessage did not answer within 30 seconds`) while the plain-message,
-            // history and authentication tests always passed. Waiting for the bus removes the race.
-            services.Configure<MassTransitHostOptions>(options =>
-            {
-                options.WaitUntilStarted = true;
-                options.StartTimeout = BusTimeout;
-                options.StopTimeout = BusTimeout;
-            });
-        });
+                configurator.SetTestTimeouts(BusTimeout, BusTimeout)));
     }
 
     /// <inheritdoc/>
