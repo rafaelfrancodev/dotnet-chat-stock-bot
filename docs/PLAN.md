@@ -977,13 +977,97 @@ Unit tests (36 new cases; suite **503 passing**, all offline):
 - Cleanup: the bot's probe row was deleted (`Messages` empty again, `ChatRooms` still 1, both user accounts
   left in place for 1.18).
 
-### [ ] 1.17 Add the integration test suite
-Files: `tests/Chat.IntegrationTests/{CustomWebApplicationFactory.cs,...}`
-Acceptance:
-- Factory starts a throwaway SQL Server container via `Testcontainers.MsSql` (same provider as production), applies migrations once per collection, substitutes `IStockQuoteRequester`, and provides a test-auth helper. Overriding `ConnectionStrings:ChatDatabase` with the container's string is enough — `AddPersistence` reads only that key, and throws if it is missing.
-- Tests are skipped with a clear message when Docker is unavailable, so `dotnet test` never fails for environmental reasons.
-- Covers: anonymous hub connection rejected; register→login→chat page reachable; posting a message then reading it back in order and capped at 50; `/stock=aapl.us` publishes a broker request **and creates no message row**; two hub clients in the same room see each other's messages.
-- Deterministic waits (`TaskCompletionSource` + timeout), no `Task.Delay`.
+### [x] 1.17 Add the integration test suite
+Files: `tests/Chat.IntegrationTests/Infrastructure/{DockerEnvironment,DockerFactAttribute,CookieJarHandler,ChatApplicationFactory,ChatServerFixture,ChatServerCollection,ChatParticipant,TestHubClient}.cs`,
+`tests/Chat.IntegrationTests/{AuthenticationFlowTests,MessageHistoryTests,StockCommandTests,BotAnswerTests,TwoParticipantTests}.cs`,
+`tests/Chat.IntegrationTests/Chat.IntegrationTests.csproj`, `README.md`
+Acceptance: all met — **11 tests, 16 s of test time (about 25 s wall clock including the container), green on
+three consecutive runs.** Unit suite unchanged at 503 and still hermetic.
+Decisions taken here (later tasks must conform):
+- **The bus is replaced, not the port.** 1.16 gave Chat.Web a real receive endpoint, so `WebApplicationFactory`
+  opens a RabbitMQ connection at startup and substituting `IStockQuoteRequester` alone would leave the host
+  waiting on a broker. `ConfigureTestServices` calls `AddMassTransitTestHarness`, which — documented behaviour —
+  **replaces the transport of the already-configured bus with the in-memory one and keeps every consumer
+  registration**. So the shipped topology is what runs: the real `MassTransitStockQuoteRequester`, the real
+  `StockQuoteResponseConsumer`, on the endpoint names `MessagingConstants` pins, with nothing to connect to.
+  That is also what makes `harness.Published.Any<StockQuoteRequested>()` a stronger assertion than a hand-rolled
+  fake would have been — it observes what really went on the wire. `SetTestTimeouts` bounds every bus wait.
+- **The connection string is supplied as an environment variable (`ConnectionStrings__ChatDatabase`), not through
+  `ConfigureAppConfiguration`.** `AddPersistence` reads it while `Program` is still registering services — and
+  throws when it is blank, which the committed `appsettings.json` deliberately is — so no test-side configuration
+  callback runs early enough. An environment variable is also the *last* source `WebApplication.CreateBuilder`
+  adds, so it beats `appsettings.json` **and the developer's user secrets**: without that precedence the suite
+  would have silently migrated and written to the real `ChatDb`. `ChatServerFixture` asserts the resolved
+  `DataSource`/`InitialCatalog` really are the container's before any test runs (compared field by field, so no
+  password reaches an assertion message).
+- **Authentication is the real Identity flow, and no test-only auth scheme exists.** `ChatParticipant` fetches the
+  registration and login pages, reads the antiforgery token out of the HTML and posts the forms, so the ticket the
+  hub reads — including the `display_name` claim from 1.11's claims factory — is one the application issued. A
+  test authentication handler would have proven only that a fake principal reaches the hub, and would have been a
+  security smell if it ever became reachable from `Chat.Web`. `CookieJarHandler` owns the `CookieContainer`
+  (`TestServer.CreateHandler()` has none, so antiforgery could not survive the GET→POST), and it exposes the
+  session as a `Cookie` header because `HubConnection` cannot share the handler chain —
+  `HttpConnectionOptions.Cookies` is dropped as soon as `HttpMessageHandlerFactory` supplies the handler.
+- **The environment is pinned to Development**, which `WebApplicationFactory` also defaults to: outside
+  Development `AddChatIdentity` pins the auth cookie to HTTPS, and an `Always` cookie never returns over
+  TestServer's plain HTTP — every login would look like a wrong password. This is the same configuration as the
+  documented local run on port 5271, so the shipped cookie policy is exercised rather than relaxed.
+- **One container and one host per collection; isolation is by aggregate key, not by cleanup.** A SQL Server
+  container costs tens of seconds, so one is started for the whole collection and the schema is migrated once —
+  by the host's own `InitializeChatDatabaseAsync`, the production startup path, not a test copy of it. Each test
+  then creates its own room and its own accounts, and every read path filters by `ChatRoomId`, so the test that
+  seeds sixty messages to prove the fifty-message cap is invisible to the others and nothing has to be truncated
+  between runs. Serialising the collection is what lets `CountCommandRowsAsync` assert
+  `SELECT COUNT(*) FROM Messages WHERE Content LIKE '/%'` = 0 for the **whole table**, which is the reviewer's own
+  query and cannot be expressed in LINQ (`Content` is value-converted).
+- **Skipping is decided at discovery, because xUnit v2 has no runtime skip** (`Assert.Skip` is v3, and
+  `xunit.execution` 2.9.3 does not honour the dynamic-skip token). `[DockerFact]` is a `FactAttribute` whose
+  constructor sets `Skip` from `DockerEnvironment.SkipReason`, so a machine without Docker reports 11 skips with a
+  sentence explaining what to start, and `dotnet test` still exits 0. The probe is Testcontainers' own endpoint
+  resolution (`TestcontainersSettings.OS.DockerEndpointAuthConfig is null` — the library's "Docker is either not
+  running or misconfigured" branch, verified present in 4.13.0) rather than a hand-rolled socket check, so the
+  suite cannot disagree with the library about whether a container could be started. `CHAT_TESTS_SKIP_DOCKER=1`
+  forces the same path for an agent that has no daemon.
+  **Measured, and worth knowing:** pointing `DOCKER_HOST` at an unreachable endpoint does *not* skip on Windows —
+  Testcontainers falls back to the Docker Desktop named pipe and starts the container anyway, so the tests
+  correctly ran. The skip path was therefore demonstrated through the opt-out variable, which is the same single
+  line of code.
+- **Every wait is a `TaskCompletionSource` with a timeout; there is no `Task.Delay` anywhere.** `TestHubClient`
+  queues pushes that arrive before a test asks for them, so waits never race the transport. "A stock command is
+  not broadcast" is proved with a **barrier** rather than a timeout: an ordinary line is sent after the command
+  and asserted to be the *first* push, which works because SignalR preserves per-connection order — waiting for a
+  silence to elapse would be slower and weaker. `[DockerFact]` also carries a 60 s `Timeout` and the container
+  start is bounded at 5 minutes, because `HubConnection.InvokeAsync` has no timeout of its own and a wedged
+  server must fail readably instead of hanging a build with no output (observed once, on a Docker stall).
+- **`Chat.IntegrationTests` references `Chat.Web` only** — a deviation from 0.1's "Web+Bot". `Chat.Bot` grants this
+  project `InternalsVisibleTo`, so its generated top-level `Program` would be visible too and
+  `WebApplicationFactory<Program>` would be an ambiguous reference. The bot is covered by `Chat.UnitTests` over its
+  consumer and by 1.18's manual run; the contract *between* the two hosts is exercised here by publishing
+  `StockQuoteResolved` onto the bus, exactly as the bot does.
+- **`Testcontainers.MsSql` 4.13.0** (MIT, already pinned in `Directory.Packages.props` since 0.2, no advisories)
+  is the only new reference, and it is pointed at `mcr.microsoft.com/mssql/server:2022-latest` — the image
+  `docker-compose.dev.yml` already pulls — so the suite downloads nothing on a machine that has run the app, and
+  tests the provider production uses. The module's default image is a different CU tag and would cost a ~700 MB
+  pull for no benefit.
+Tests (11, all `[DockerFact]`, one collection):
+- `AuthenticationFlowTests` (4): `ChatPage_AnonymousVisitor_IsRedirectedToTheLoginPage`,
+  `RegisterThenLogIn_NewParticipant_ReachesTheChatPage` (registers on one browser, logs in on a second,
+  cookie-less one, then asserts `/Chat` renders a room id and the captured display name),
+  `HubNegotiate_WithoutAnAuthenticationCookie_IsUnauthorized` (401 on the raw negotiate),
+  `HubConnection_WithoutAnAuthenticationCookie_IsRejected`.
+- `MessageHistoryTests` (2): `SendMessage_SeveralLines_AreReadBackFromTheHistoryOldestFirst` (posted over the hub,
+  read back by a second connection: order, author, origin and zero UTC offset),
+  `JoinRoom_MoreHistoryThanTheLimit_ReturnsOnlyTheNewestFiftyOldestFirst` (60 seeded posts a second apart → the
+  newest 50, oldest first, and all 60 still in the store).
+- `StockCommandTests` (3): `SendMessage_StockCommand_PublishesABrokerRequestForTheRoomAndTheTicker` (exactly one
+  `StockQuoteRequested`, normalised code, requester identity from the ticket),
+  `SendMessage_StockCommand_CreatesNoMessageRow` (**the hard constraint**: zero rows in the room and zero
+  `Content LIKE '/%'` rows in the table), `SendMessage_StockCommand_IsNeverBroadcastToTheRoom`.
+- `BotAnswerTests` (1): `StockQuoteResolved_ArrivingFromTheBot_IsPostedByTheBotAndReachesTheRoom` — publishing the
+  bot's contract puts `"AAPL.US quote is $93.42 per share"` in the room with `AuthorDisplayName = "Bot"`,
+  `Origin = Bot`, and one persisted row.
+- `TwoParticipantTests` (1): `SendMessage_TwoParticipantsInTheSameRoom_EachSeesBothLinesInTheSameOrder` — the
+  reviewer's two browsers, each line stored once.
 
 ### [ ] 1.18 Verify the end-to-end flow manually and record it
 Files: `docs/ARCHITECTURE.md` (adjust if reality differs)

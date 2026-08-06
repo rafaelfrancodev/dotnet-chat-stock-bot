@@ -17,7 +17,7 @@ itself is never written to the database — only the bot's answer is.
 | Post owner is the bot | `Message.PostByBot` — takes no author, uses `MessageAuthor.Bot` |
 | Ordered by timestamp, last 50 only | `MessageRepository.GetLatestAsync`, capped in `GetLatestMessagesValidator` |
 | The stock command is never persisted | Enforced structurally in four layers — see [Design decisions](#design-decisions) |
-| Unit tests | 503 tests in `tests/Chat.UnitTests` |
+| Unit tests | 503 tests in `tests/Chat.UnitTests`, plus 11 in `tests/Chat.IntegrationTests` |
 
 ---
 
@@ -194,14 +194,29 @@ job — consuming requests and answering politely — still works.
 dotnet test
 ```
 
-**503 tests, all passing.** The suite is hermetic: it needs no containers, no broker and no network
-access. Database behaviour is covered by translating EF Core queries offline (`ToQueryString()`) and by
+**514 tests, all passing** — 503 unit tests and 11 integration tests.
+
+`tests/Chat.UnitTests` (503) is **hermetic**: no containers, no broker, no network access, about three
+seconds. Database behaviour is covered by translating EF Core queries offline (`ToQueryString()`) and by
 SQLite in process memory where a real unique index is needed; messaging is covered by MassTransit's
 in-memory `ITestHarness`; Stooq is covered by a stubbed `HttpMessageHandler` pointed at a
 deliberately-unroutable host so a bypassed stub fails loudly instead of calling the real service.
 
-`dotnet test` also prints `No test is available in ... Chat.IntegrationTests.dll`. That is expected —
-the integration suite (task 1.17) is not written yet, and the exit code is still 0.
+`tests/Chat.IntegrationTests` (11) hosts the real `Chat.Web` with `WebApplicationFactory` against a
+**throwaway SQL Server container** (`Testcontainers.MsSql`, the same image `docker-compose.dev.yml` uses),
+so it **needs Docker** — about 25 seconds including the container. RabbitMQ is *not* needed: the bus is
+replaced by MassTransit's in-memory test harness, which keeps the real publisher adapters, the real
+response consumer and the endpoint names from `MessagingConstants`. It covers the anonymous hub connection
+being rejected, register → login → chat page, posting and reading history back in order and capped at 50,
+`/stock=aapl.us` publishing a broker request while creating **no** message row, a bot answer arriving over
+the broker and being posted as the bot, and two SignalR clients in one room seeing each other's lines.
+
+**Without Docker the integration tests skip with a reason instead of failing**, so `dotnet test` still
+exits 0 on a machine that has no daemon:
+
+```bash
+CHAT_TESTS_SKIP_DOCKER=1 dotnet test    # Skipped! - Failed: 0, Passed: 0, Skipped: 11
+```
 
 Other gates:
 
@@ -226,8 +241,8 @@ src/
   Chat.Web/             SignalR hub, Identity UI, minimal Razor chat page, composition root
   Chat.Bot/             MassTransit consumer -> Stooq -> answer; health endpoints only
 tests/
-  Chat.UnitTests/       503 tests
-  Chat.IntegrationTests/  empty (task 1.17)
+  Chat.UnitTests/       503 tests, hermetic
+  Chat.IntegrationTests/  11 tests over the real host; needs Docker, skips cleanly without it
 ```
 
 Dependency rule — `Chat.Web`/`Chat.Bot` → `Chat.Infrastructure` → `Chat.Application` → `Chat.Domain`,
@@ -396,7 +411,6 @@ requirements are implemented and verified end-to-end. Outstanding items, tracked
 
 | Task | Item |
 | --- | --- |
-| 1.17 | Integration test suite (`Testcontainers.MsSql` + `WebApplicationFactory`); `Chat.IntegrationTests` is an empty project today |
 | 1.18 | The manual end-to-end walkthrough recorded in `docs/ARCHITECTURE.md` |
 | 2.2 | Multiple chatrooms (bonus) |
 | 2.4 | Per-user posting rate limit (bonus) |
