@@ -281,21 +281,27 @@ SQLite in process memory where a real unique index is needed; messaging is cover
 in-memory `ITestHarness`; Stooq is covered by a stubbed `HttpMessageHandler` pointed at a
 deliberately-unroutable host so a bypassed stub fails loudly instead of calling the real service.
 
-`tests/Chat.IntegrationTests` (19) hosts the real `Chat.Web` with `WebApplicationFactory` against a
-**throwaway SQL Server container** (`Testcontainers.MsSql`, the same image `docker-compose.dev.yml` uses),
-so it **needs Docker** — about 25 seconds including the container. RabbitMQ is *not* needed: the bus is
+`tests/Chat.IntegrationTests` (19) splits by what it needs. Eleven host the real `Chat.Web` with
+`WebApplicationFactory` against a **throwaway SQL Server container** (`Testcontainers.MsSql`, the same image
+`docker-compose.dev.yml` uses), so those **need Docker**. The other eight — `StockQuoteResolutionTests`,
+which drive the bot's half of the round trip — need nothing: the bot has no database by design, so they are
+plain `[Fact]`s that run anywhere. The whole file takes 4–14 seconds. RabbitMQ is *not* needed: the bus is
 replaced by MassTransit's in-memory test harness, which keeps the real publisher adapters, the real
 response consumer and the endpoint names from `MessagingConstants`. It covers the anonymous hub connection
 being rejected, register → login → chat page, posting and reading history back in order and capped at 50,
 `/stock=aapl.us` publishing a broker request while creating **no** message row, a bot answer arriving over
 the broker and being posted as the bot, and two SignalR clients in one room seeing each other's lines.
 
-**Without Docker the integration tests skip with a reason instead of failing**, so `dotnet test` still
-exits 0 on a machine that has no daemon:
+**Without Docker the eleven container tests skip with a reason instead of failing**, so `dotnet test` still
+exits 0 on a machine that has no daemon. `DockerEnvironment` asks Testcontainers itself whether an endpoint
+answers, and `[DockerFact]` turns that into an xUnit skip reason naming what to start — an environmental
+gap must not read as a broken build. The same switch is available deliberately:
 
 ```bash
-CHAT_TESTS_SKIP_DOCKER=1 dotnet test    # Skipped! - Failed: 0, Passed: 0, Skipped: 11
+CHAT_TESTS_SKIP_DOCKER=1 dotnet test    # PowerShell: $env:CHAT_TESTS_SKIP_DOCKER='1'
 ```
+
+Measured with it set: 539 unit passed, then 8 passed / 11 skipped / 0 failed, exit code 0.
 
 Other gates:
 
