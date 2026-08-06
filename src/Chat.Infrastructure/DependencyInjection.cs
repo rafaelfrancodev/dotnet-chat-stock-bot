@@ -25,16 +25,22 @@ public static class DependencyInjection
 {
     /// <summary>
     /// Configuration key choosing which quote provider the bot uses. Defaults to
-    /// <see cref="StooqProvider"/>, the endpoint the challenge names.
+    /// <see cref="FinnhubProvider"/>.
     /// </summary>
     public const string StockQuoteProviderKey = "Stocks:Provider";
 
-    /// <summary>Stooq's CSV endpoint — the default.</summary>
+    /// <summary>
+    /// Stooq's CSV endpoint — the service the challenge names. Kept and still selectable, but no longer the
+    /// default: its CSV paths cannot be read from a server (404 on one, a browser proof-of-work check on
+    /// the other), so it can only ever answer with a friendly failure.
+    /// </summary>
     public const string StooqProvider = "Stooq";
 
     /// <summary>
-    /// Finnhub's JSON quote API. An alternative for when Stooq cannot be read, chosen because it is built
-    /// for programmatic access and answers an <c>HttpClient</c> rather than requiring a browser.
+    /// Finnhub's JSON quote API — the default, because it is the one that actually returns a price. It is
+    /// built for programmatic access, so it answers an <c>HttpClient</c> rather than requiring a browser.
+    /// Needs <c>Finnhub:ApiKey</c>; without it the bot logs the gap and answers as it would for any
+    /// unreachable provider.
     /// </summary>
     public const string FinnhubProvider = "Finnhub";
 
@@ -199,7 +205,7 @@ public static class DependencyInjection
             .AddOptions<FinnhubOptions>()
             .Bind(configuration.GetSection(FinnhubOptions.SectionName));
 
-        string provider = configuration[StockQuoteProviderKey] ?? StooqProvider;
+        string provider = configuration[StockQuoteProviderKey] ?? FinnhubProvider;
 
         if (provider.Equals(FinnhubProvider, StringComparison.OrdinalIgnoreCase))
         {

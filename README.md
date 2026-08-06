@@ -6,9 +6,10 @@ A browser chat application where registered users log in and talk in a chatroom 
 published back so the web host posts the answer into the room as the **bot**. The command itself is never
 written to the database — only the bot's answer is.
 
-Two quote providers ship behind one port: **Stooq** (the endpoint the challenge names, the default) and
-**Finnhub** (a keyed JSON API). Stooq's CSV endpoint became unreachable from a server while this was
-built, which is why the second one exists — see [Quote providers](#quote-providers--stooq-and-finnhub).
+Two quote providers ship behind one port: **Finnhub** (a keyed JSON API, the default) and **Stooq** (the
+endpoint the challenge names). Stooq's CSV endpoint became unreachable from a server while this was built,
+which is why the second one exists and is now the default — see
+[Quote providers](#quote-providers--stooq-and-finnhub).
 
 ## Mandatory requirements and where they are
 
@@ -21,7 +22,7 @@ built, which is why the second one exists — see [Quote providers](#quote-provi
 | Post owner is the bot | `Message.PostByBot` — takes no author, uses `MessageAuthor.Bot` |
 | Ordered by timestamp, last 50 only | `MessageRepository.GetLatestAsync`, capped in `GetLatestMessagesValidator` |
 | The stock command is never persisted | Enforced structurally in four layers — see [Design decisions](#design-decisions) |
-| Unit tests | 531 tests in `tests/Chat.UnitTests`, plus 19 in `tests/Chat.IntegrationTests` |
+| Unit tests | 539 tests in `tests/Chat.UnitTests`, plus 19 in `tests/Chat.IntegrationTests` |
 
 ---
 
@@ -85,8 +86,8 @@ Each host has its own secret store, keyed by the `UserSecretsId` in its `.csproj
 | --- | --- | --- | --- |
 | `ConnectionStrings:ChatDatabase` | **required** | — | SQL Server. The bot has no database *by design*, so it has no connection string |
 | `RabbitMq:UserName` / `RabbitMq:Password` | **required** | **required** | Both processes talk to the broker; that is the only thing they share |
-| `Stocks:Provider` | — | optional | `Stooq` (default) or `Finnhub` |
-| `Finnhub:ApiKey` | — | required *for Finnhub* | Free key from finnhub.io. Only the bot calls a quote service |
+| `Stocks:Provider` | — | optional | `Finnhub` (default) or `Stooq` |
+| `Finnhub:ApiKey` | — | **required** for a real price | Free key from finnhub.io. Only the bot calls a quote service; without it the bot answers a friendly failure |
 
 **SQL Server — `Chat.Web` only:**
 
@@ -106,13 +107,17 @@ dotnet user-secrets set "RabbitMq:UserName" "<RABBITMQ_USER from .env>"     --pr
 dotnet user-secrets set "RabbitMq:Password" "<RABBITMQ_PASSWORD from .env>" --project src/Chat.Bot
 ```
 
-**Quote provider — `Chat.Bot` only.** Optional: Stooq is the default and needs no key. To use Finnhub
-instead, see [Quote providers](#quote-providers--stooq-and-finnhub):
+**Quote provider — `Chat.Bot` only.** Finnhub is the default and needs a free key from
+[finnhub.io](https://finnhub.io) to return a real price:
 
 ```bash
-dotnet user-secrets set "Stocks:Provider" "Finnhub"        --project src/Chat.Bot
-dotnet user-secrets set "Finnhub:ApiKey"  "<your-api-key>" --project src/Chat.Bot
+dotnet user-secrets set "Finnhub:ApiKey" "<your-api-key>" --project src/Chat.Bot
 ```
+
+Skip it and everything still runs — the bot simply answers `I could not reach the quote service…` and
+shows the red banner. To select Stooq instead, add
+`dotnet user-secrets set "Stocks:Provider" "Stooq" --project src/Chat.Bot`; see
+[Quote providers](#quote-providers--stooq-and-finnhub) for why that is no longer the default.
 
 **Checking and clearing:**
 
@@ -252,9 +257,9 @@ job — consuming requests and answering politely — still works.
 dotnet test
 ```
 
-**550 tests, all passing** — 531 unit tests and 19 integration tests.
+**558 tests, all passing** — 539 unit tests and 19 integration tests.
 
-`tests/Chat.UnitTests` (531) is **hermetic**: no containers, no broker, no network access, about three
+`tests/Chat.UnitTests` (539) is **hermetic**: no containers, no broker, no network access, about three
 seconds. Database behaviour is covered by translating EF Core queries offline (`ToQueryString()`) and by
 SQLite in process memory where a real unique index is needed; messaging is covered by MassTransit's
 in-memory `ITestHarness`; Stooq is covered by a stubbed `HttpMessageHandler` pointed at a
@@ -393,23 +398,37 @@ changes, and neither the domain, the messaging, the hub nor the UI knows the dif
 
 | `Stocks:Provider` | Implementation | Endpoint | Needs a key |
 | --- | --- | --- | --- |
-| `Stooq` *(default)* | `StooqClient` + `StooqCsvParser` | `https://stooq.com/q/d/l/?s={code}&i=d` — CSV | no |
-| `Finnhub` | `FinnhubClient` + `FinnhubQuoteParser` | `https://finnhub.io/api/v1/quote` — JSON | yes |
+| `Finnhub` *(default)* | `FinnhubClient` + `FinnhubQuoteParser` | `https://finnhub.io/api/v1/quote` — JSON | **yes** |
+| `Stooq` | `StooqClient` + `StooqCsvParser` | `https://stooq.com/q/d/l/?s={code}&i=d` — CSV | no |
+
+**Finnhub is the default because it is the one that returns a price.** It needs one free key from
+[finnhub.io](https://finnhub.io):
 
 ```bash
-# Stooq is the default and needs nothing. To use Finnhub instead:
-dotnet user-secrets set "Stocks:Provider" "Finnhub"        --project src/Chat.Bot
-dotnet user-secrets set "Finnhub:ApiKey"  "<your-api-key>" --project src/Chat.Bot
+dotnet user-secrets set "Finnhub:ApiKey" "<your-api-key>" --project src/Chat.Bot
 ```
 
-A free key from [finnhub.io](https://finnhub.io) is enough. Only `Chat.Bot` needs either setting — it is
-the only process that calls a quote service. A misspelled provider name fails at startup rather than
-silently falling back, so a typo cannot look like the alternative quietly not being used.
+Only `Chat.Bot` needs it — it is the only process that calls a quote service.
 
-### Why Finnhub exists in this project
+**Without a key** nothing breaks: the bot logs
+`Finnhub:ApiKey is not configured, so no quote can be requested`, answers the room with
+`I could not reach the quote service, so I have no price for AAPL.US right now.` and shows the asking
+participant the red banner. Chat, history, the two-browser scenario and the "command is never persisted"
+guarantee all work exactly as before — only the price is missing.
 
-The challenge names Stooq's CSV endpoint, and that is still the default. It stopped being usable from a
-server while this was being built, in two stages — both measured, both recorded below in
+**To use Stooq instead** (no key, but see below — its CSV is no longer readable from a server):
+
+```bash
+dotnet user-secrets set "Stocks:Provider" "Stooq" --project src/Chat.Bot
+```
+
+A misspelled provider name fails at startup rather than silently falling back, so a typo cannot look like
+the alternative quietly not being used.
+
+### Why Finnhub is the default
+
+The challenge names Stooq's CSV endpoint, and it is still implemented and selectable. It stopped being
+usable from a server while this was being built, in two stages — both measured, both recorded below in
 [A note about Stooq](#a-note-about-stooq):
 
 1. The documented single-quote path `/q/l/?s=…&f=sd2t2ohlcv&h&e=csv` now answers **404**.
@@ -575,7 +594,7 @@ publish to the message bus hang until their backstop and the run reports three f
 seconds on three consecutive runs after the failing first one. If you hit it, re-run:
 
 ```bash
-dotnet test tests/Chat.UnitTests           # 531, hermetic, ~3 s
+dotnet test tests/Chat.UnitTests           # 539, hermetic, ~3 s
 dotnet test tests/Chat.IntegrationTests    # 19, needs Docker, ~20 s
 ```
 

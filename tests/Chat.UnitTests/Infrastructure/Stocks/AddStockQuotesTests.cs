@@ -48,16 +48,27 @@ public sealed class AddStockQuotesTests
         services.GetRequiredService<IStockQuoteProvider>().Should().BeOfType<FinnhubClient>();
     }
 
-    /// <summary>Stooq stays the default, so a deployment that sets nothing keeps the documented endpoint.</summary>
+    /// <summary>Stooq is still selectable — it is simply no longer the default.</summary>
     [Theory]
-    [InlineData(null)]
     [InlineData("Stooq")]
     [InlineData("stooq")]
-    public async Task AddStockQuotes_WhenTheProviderIsAbsentOrStooq_ResolvesTheStooqClient(string? provider)
+    public async Task AddStockQuotes_WhenTheProviderIsStooq_ResolvesTheStooqClient(string provider)
     {
         await using ServiceProvider services = ForProvider(provider);
 
         services.GetRequiredService<IStockQuoteProvider>().Should().BeOfType<StooqClient>();
+    }
+
+    /// <summary>
+    /// Setting nothing gets Finnhub, because it is the provider that actually returns a price. Stooq is
+    /// the endpoint the challenge names, but its CSV paths cannot be read from a server.
+    /// </summary>
+    [Fact]
+    public async Task AddStockQuotes_WhenTheProviderIsAbsent_DefaultsToFinnhub()
+    {
+        await using ServiceProvider services = ForProvider(provider: null);
+
+        services.GetRequiredService<IStockQuoteProvider>().Should().BeOfType<FinnhubClient>();
     }
 
     /// <summary>
@@ -234,6 +245,10 @@ public sealed class AddStockQuotesTests
         return new ConfigurationBuilder().AddInMemoryCollection(settings).Build();
     }
 
+    /// <summary>
+    /// A Stooq-configured provider. Stooq is asked for explicitly because Finnhub is the default now, and
+    /// these tests are about the Stooq adapter specifically.
+    /// </summary>
     private static ServiceProvider Configured(Func<HttpRequestMessage, HttpResponseMessage>? respond = null)
     {
         ServiceCollection services = [];
@@ -252,6 +267,9 @@ public sealed class AddStockQuotesTests
         new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?>
             {
+                // Asked for explicitly: Finnhub is the default, and everything below this line is about
+                // the Stooq adapter in particular.
+                [DependencyInjection.StockQuoteProviderKey] = DependencyInjection.StooqProvider,
                 ["Stooq:BaseAddress"] = "https://quotes.invalid/",
                 ["Stooq:QuotePath"] = "q/l/?s={0}&f=configured&e=csv",
                 ["Stooq:TimeoutSeconds"] = "7",

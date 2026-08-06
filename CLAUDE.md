@@ -71,7 +71,7 @@ dotnet tool restore                           # once — pins dotnet-ef 10.0.10 
 docker compose -f docker-compose.dev.yml up -d   # SQL Server 2022 + RabbitMQ 4 (UI: http://localhost:15672)
 docker compose -f docker-compose.dev.yml ps      # wait for both to report (healthy)
 dotnet build                                  # 0 warnings expected (TreatWarningsAsErrors)
-dotnet test                                   # 531 unit (hermetic) + 19 integration (needs Docker)
+dotnet test                                   # 539 unit (hermetic) + 19 integration (needs Docker)
 dotnet format                                 # before committing
 dotnet format --verify-no-changes             # CI-style gate
 
@@ -111,9 +111,9 @@ dotnet user-secrets set "RabbitMq:Password" "<from .env>" --project src/Chat.Web
 dotnet user-secrets set "RabbitMq:UserName" "<from .env>" --project src/Chat.Bot
 dotnet user-secrets set "RabbitMq:Password" "<from .env>" --project src/Chat.Bot
 
-# Quote provider — Chat.Bot only. Stooq is the default and needs no key.
-dotnet user-secrets set "Stocks:Provider" "Finnhub" --project src/Chat.Bot
+# Quote provider — Chat.Bot only. Finnhub is the default; the key is what makes a real price possible.
 dotnet user-secrets set "Finnhub:ApiKey" "<free key from finnhub.io>" --project src/Chat.Bot
+dotnet user-secrets set "Stocks:Provider" "Stooq" --project src/Chat.Bot   # to select Stooq instead
 ```
 
 ## Workflow (Claude Code)
@@ -138,7 +138,7 @@ Agents: `architect`, `implementer`, `test-engineer`, `code-reviewer`, `docs-main
 
 ## Gotchas
 
-- **Two quote providers sit behind `IStockQuoteProvider`, chosen by `Stocks:Provider`**: `Stooq` (default) and `Finnhub` (needs `Finnhub:ApiKey`). Stooq's CSV endpoint is unreachable from a server — `/q/l/` is 404 and `/q/d/l/` serves a JavaScript proof-of-work browser check (429 on an unsolved `/__verify`). **Do not implement a solver for it**; that is circumventing an access control, and Finnhub exists because it is an API built for programmatic access. Verified live: `AAPL.US quote is $311.51 per share`.
+- **Two quote providers sit behind `IStockQuoteProvider`, chosen by `Stocks:Provider`**: `Finnhub` (**default**, needs `Finnhub:ApiKey` for a real price) and `Stooq`. Without a key the bot answers a friendly failure and logs the gap — nothing else breaks. Stooq's CSV endpoint is unreachable from a server — `/q/l/` is 404 and `/q/d/l/` serves a JavaScript proof-of-work browser check (429 on an unsolved `/__verify`). **Do not implement a solver for it**; that is circumventing an access control, and Finnhub exists because it is an API built for programmatic access. Verified live: `AAPL.US quote is $311.51 per share`.
 - Unknown symbol is a **friendly answer with no banner** (`SymbolNotFound`), and only a service failure raises the red banner (`LookupFailed`). Stooq signals it with `N/D` in a CSV row; Finnhub with HTTP 200 and every number zero. `Access denied` from Stooq is **not** an unknown symbol — measured returning identically for a valid ticker — so it is a refusal. Never build the Stooq URL from raw input: `StockCode.Create` already normalises to lower case and enforces `^[a-z0-9.\-]{1,20}$` (anchored `\A`/`\z`, because in .NET `$` also matches before a trailing newline).
 - Reviewers will open 2 browsers with 2 users: broadcast via SignalR groups per room, identity from claims (never from client payload).
 - `Messages` deliberately has **no foreign key at all**. The bot's author id `system:bot` is not an Identity user, so an FK to `AspNetUsers` would reject every quote answer the challenge requires; `ChatRoomId` is validated with `ExistsAsync` instead.
