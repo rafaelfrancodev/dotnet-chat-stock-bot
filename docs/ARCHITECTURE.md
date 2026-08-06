@@ -508,7 +508,7 @@ Both hosts expose the same three routes, mapped from one definition
 | Host | Dependencies probed |
 | --- | --- |
 | `Chat.Web` | `sql-server` (`SELECT 1`), `rabbitmq` (open a connection), `masstransit-bus` |
-| `Chat.Bot` | `rabbitmq`, `stooq` (probe the service root), `masstransit-bus` |
+| `Chat.Bot` | `rabbitmq`, `stock-quote-provider` (probes the configured provider's service root), `masstransit-bus` |
 
 ### Why there are two broker checks
 

@@ -95,7 +95,7 @@ instead of setting a single startup project.
 
 ```bash
 curl http://localhost:5271/health             # Chat.Web: sql-server + rabbitmq + masstransit-bus
-curl http://localhost:5299/health             # Chat.Bot: rabbitmq + stooq + masstransit-bus
+curl http://localhost:5299/health             # Chat.Bot: rabbitmq + stock-quote-provider + masstransit-bus
 curl http://localhost:5271/health/ready       # readiness-tagged dependencies only
 curl http://localhost:5271/health/live        # process liveness, runs no dependency probe
 ```

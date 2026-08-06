@@ -258,12 +258,30 @@ Both hosts expose the same three routes.
 
 ```bash
 curl http://localhost:5271/health    # masstransit-bus, sql-server, rabbitmq
-curl http://localhost:5299/health    # masstransit-bus, rabbitmq, stooq
+curl http://localhost:5299/health    # masstransit-bus, rabbitmq, stock-quote-provider
 ```
 
-The Stooq check is tagged `external` and is deliberately **excluded from `/health/ready`**: a third-party
-outage must not mark the bot unready and get it restarted or pulled out of rotation, because the bot's own
-job — consuming requests and answering politely — still works.
+`stock-quote-provider` **probes whichever provider `Stocks:Provider` selects**, and its `description` names
+the one that answered — so `/health` tells you how the bot is configured without reading its settings:
+
+```json
+{ "name": "stock-quote-provider", "status": "Healthy",
+  "description": "Finnhub responded 200.", "tags": ["external"] }
+```
+
+The check is named for the role rather than the vendor because the vendor is configuration. The same call
+that registers the quote client resolves the provider here, so the probe cannot end up watching a service
+the bot never calls. Verified live both ways: `Finnhub responded 200.` by default, and
+`Stooq responded 200.` with `Stocks__Provider=Stooq`.
+
+It reports one more thing nothing else does: with Finnhub selected and **no API key**, the check is
+`Degraded` and says which key is missing and how to set it. That is the gap most likely to be left on a
+fresh clone, and without this it surfaces only as the bot answering "I could not reach the quote service" —
+which reads like a broken bot rather than missing setup.
+
+The check is tagged `external` and is deliberately **excluded from `/health/ready`**: a third-party outage
+must not mark the bot unready and get it restarted or pulled out of rotation, because the bot's own job —
+consuming requests and answering politely — still works.
 
 ---
 

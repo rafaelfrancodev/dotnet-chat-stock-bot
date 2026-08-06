@@ -28,7 +28,7 @@ builder.Services.AddStockQuotes(builder.Configuration);
 // No database probe: the bot has no persistence by design, which is what keeps it decoupled.
 builder.Services.AddHealthChecks()
     .AddChatBroker(builder.Configuration)
-    .AddStooq(builder.Configuration);
+    .AddStockQuoteProvider(builder.Configuration);
 
 WebApplication app = builder.Build();
 

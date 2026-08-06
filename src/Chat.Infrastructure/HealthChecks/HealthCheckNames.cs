@@ -21,8 +21,16 @@ public static class HealthCheckNames
     /// </summary>
     public const string MassTransitBus = "masstransit-bus";
 
-    /// <summary>The third-party quote provider the bot calls.</summary>
-    public const string Stooq = "stooq";
+    /// <summary>
+    /// The third-party quote service the bot calls, whichever one <c>Stocks:Provider</c> selects.
+    /// </summary>
+    /// <remarks>
+    /// Named for the role, not for a vendor, because the vendor is configuration. The check used to be
+    /// called <c>stooq</c> and probed Stooq unconditionally, which reported on a service the bot was not
+    /// calling once Finnhub became the default. The report's <c>description</c> names the provider that was
+    /// actually probed, so <c>/health</c> answers "which provider is this process using?" on its own.
+    /// </remarks>
+    public const string StockQuoteProvider = "stock-quote-provider";
 
     /// <summary>
     /// Dependencies a host must reach before it can do useful work. Surfaced by <c>/health/ready</c>.

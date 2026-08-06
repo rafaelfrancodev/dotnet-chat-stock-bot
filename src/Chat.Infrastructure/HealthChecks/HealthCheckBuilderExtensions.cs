@@ -9,8 +9,8 @@ using Microsoft.Extensions.Options;
 namespace Chat.Infrastructure.HealthChecks;
 
 /// <summary>
-/// Registers a dependency probe per infrastructure concern. Each host opts in to only the dependencies
-/// it actually has: Chat.Web takes the database and the broker, Chat.Bot takes the broker and Stooq.
+/// Registers a dependency probe per infrastructure concern. Each host opts in to only the dependencies it
+/// actually has: Chat.Web takes the database and the broker, Chat.Bot takes the broker and its quote provider.
 /// </summary>
 public static class HealthCheckBuilderExtensions
 {
@@ -70,16 +70,50 @@ public static class HealthCheckBuilderExtensions
     }
 
     /// <summary>
-    /// Probes Stooq. Tagged <see cref="HealthCheckNames.ExternalTag"/> and excluded from readiness:
-    /// the bot stays ready during a Stooq outage and answers with a friendly failure instead.
+    /// Probes whichever quote service <c>Stocks:Provider</c> selects. Tagged
+    /// <see cref="HealthCheckNames.ExternalTag"/> and excluded from readiness: the bot stays ready during a
+    /// provider outage and answers with a friendly failure instead.
     /// </summary>
-    public static IHealthChecksBuilder AddStooq(
+    /// <param name="builder">Health checks builder to register into.</param>
+    /// <param name="configuration">Configuration carrying <c>Stocks:Provider</c> and the provider section.</param>
+    /// <exception cref="InvalidOperationException"><c>Stocks:Provider</c> names no known provider.</exception>
+    /// <remarks>
+    /// The provider is resolved by <c>StockQuoteProviderSelection</c>, the same call <c>AddStockQuotes</c>
+    /// makes, so the probe cannot drift from the client the bot actually uses. Both branches register under
+    /// <see cref="HealthCheckNames.StockQuoteProvider"/>, so the payload's shape does not change with
+    /// configuration — only which service the description names.
+    /// </remarks>
+    public static IHealthChecksBuilder AddStockQuoteProvider(
         this IHealthChecksBuilder builder,
         IConfiguration configuration)
     {
         ArgumentNullException.ThrowIfNull(builder);
         ArgumentNullException.ThrowIfNull(configuration);
 
+        return StockQuoteProviderSelection.Resolve(configuration) is StockQuoteProviderKind.Finnhub
+            ? AddFinnhub(builder, configuration)
+            : AddStooq(builder, configuration);
+    }
+
+    private static IHealthChecksBuilder AddFinnhub(IHealthChecksBuilder builder, IConfiguration configuration)
+    {
+        builder.Services
+            .AddOptions<FinnhubOptions>()
+            .Bind(configuration.GetSection(FinnhubOptions.SectionName));
+
+        builder.Services
+            .AddHttpClient<FinnhubHealthCheck>(static (provider, client) =>
+                client.Timeout = TimeSpan.FromSeconds(
+                    provider.GetRequiredService<IOptions<FinnhubOptions>>().Value.TimeoutSeconds));
+
+        return builder.AddCheck<FinnhubHealthCheck>(
+            HealthCheckNames.StockQuoteProvider,
+            HealthStatus.Degraded,
+            [HealthCheckNames.ExternalTag]);
+    }
+
+    private static IHealthChecksBuilder AddStooq(IHealthChecksBuilder builder, IConfiguration configuration)
+    {
         builder.Services
             .AddOptions<StooqOptions>()
             .Bind(configuration.GetSection(StooqOptions.SectionName));
@@ -90,7 +124,7 @@ public static class HealthCheckBuilderExtensions
                     provider.GetRequiredService<IOptions<StooqOptions>>().Value.TimeoutSeconds));
 
         return builder.AddCheck<StooqHealthCheck>(
-            HealthCheckNames.Stooq,
+            HealthCheckNames.StockQuoteProvider,
             HealthStatus.Degraded,
             [HealthCheckNames.ExternalTag]);
     }

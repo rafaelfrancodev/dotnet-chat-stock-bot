@@ -205,9 +205,8 @@ public static class DependencyInjection
             .AddOptions<FinnhubOptions>()
             .Bind(configuration.GetSection(FinnhubOptions.SectionName));
 
-        string provider = configuration[StockQuoteProviderKey] ?? FinnhubProvider;
-
-        if (provider.Equals(FinnhubProvider, StringComparison.OrdinalIgnoreCase))
+        // Resolved once, centrally, so the bot's health check probes the provider the bot actually calls.
+        if (StockQuoteProviderSelection.Resolve(configuration) is StockQuoteProviderKind.Finnhub)
         {
             services
                 .AddHttpClient<IStockQuoteProvider, FinnhubClient>(FinnhubClient.HttpClientName, ConfigureFinnhubClient)
@@ -215,15 +214,6 @@ public static class DependencyInjection
                 .Configure(ConfigureFinnhubResilience);
 
             return services;
-        }
-
-        if (!provider.Equals(StooqProvider, StringComparison.OrdinalIgnoreCase))
-        {
-            // Fail fast rather than silently falling back: a typo in the provider name would otherwise
-            // look like the alternative provider quietly not being used.
-            throw new InvalidOperationException(
-                $"{StockQuoteProviderKey} is \"{provider}\", which is not a known quote provider. "
-                + $"Use \"{StooqProvider}\" or \"{FinnhubProvider}\".");
         }
 
         services
