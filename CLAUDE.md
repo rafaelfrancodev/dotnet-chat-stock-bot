@@ -102,6 +102,8 @@ curl http://localhost:5271/health/live        # process liveness, runs no depend
 
 Copy `.env.example` to `.env` before `docker compose up`. The DB connection string and broker credentials come from user-secrets or `ConnectionStrings__ChatDatabase` / `RabbitMq__*` environment variables — never `appsettings.json`. `AddPersistence` throws at startup when the connection string is missing.
 
+`pwsh ./scripts/set-dev-secrets.ps1 [-FinnhubApiKey <key>]` writes them all from `.env` — prefer it, since hand-copying is how `.env` and the secret stores drift apart (the broker then rejects the login the apps send). Visual Studio reads the same store, so *Manage User Secrets* shows what the script wrote. The manual equivalent:
+
 ```bash
 dotnet user-secrets set "ConnectionStrings:ChatDatabase" \
   "Server=127.0.0.1,1433;Database=ChatDb;User Id=sa;Password=<from .env>;Encrypt=True;TrustServerCertificate=True" \

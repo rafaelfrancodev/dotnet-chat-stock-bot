@@ -89,6 +89,22 @@ Each host has its own secret store, keyed by the `UserSecretsId` in its `.csproj
 | `Stocks:Provider` | — | optional | `Finnhub` (default) or `Stooq` |
 | `Finnhub:ApiKey` | — | **required** for a real price | Free key from finnhub.io. Only the bot calls a quote service; without it the bot answers a friendly failure |
 
+**The short way — one command for all of it.** Everything except the Finnhub key already lives in `.env`,
+so a script reads it and writes each value to the host that needs it:
+
+```bash
+pwsh ./scripts/set-dev-secrets.ps1                            # from .env
+pwsh ./scripts/set-dev-secrets.ps1 -FinnhubApiKey "<key>"      # ...and the key
+```
+
+Re-running is safe, and it never prints a value. Prefer this over copying by hand: `.env` is what
+`docker compose` used to *create* the containers, so a typo there means the broker rejects the login the
+apps send. Keeping one source removes that class of failure. The manual equivalent follows, in case you
+would rather see each key.
+
+Visual Studio reads the very same store — *right-click the project → Manage User Secrets* opens the file
+this script writes, so configure it once and both the CLI and the IDE are set.
+
 **SQL Server — `Chat.Web` only:**
 
 ```bash
