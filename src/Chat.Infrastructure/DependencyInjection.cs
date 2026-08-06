@@ -24,6 +24,21 @@ namespace Chat.Infrastructure;
 public static class DependencyInjection
 {
     /// <summary>
+    /// Configuration key choosing which quote provider the bot uses. Defaults to
+    /// <see cref="StooqProvider"/>, the endpoint the challenge names.
+    /// </summary>
+    public const string StockQuoteProviderKey = "Stocks:Provider";
+
+    /// <summary>Stooq's CSV endpoint — the default.</summary>
+    public const string StooqProvider = "Stooq";
+
+    /// <summary>
+    /// Finnhub's JSON quote API. An alternative for when Stooq cannot be read, chosen because it is built
+    /// for programmatic access and answers an <c>HttpClient</c> rather than requiring a browser.
+    /// </summary>
+    public const string FinnhubProvider = "Finnhub";
+
+    /// <summary>
     /// EF Core, Identity stores and repository implementations. Used by Chat.Web only —
     /// Chat.Bot never calls this, which is what structurally keeps the bot away from the database.
     /// </summary>
@@ -180,10 +195,35 @@ public static class DependencyInjection
             .AddOptions<StooqOptions>()
             .Bind(configuration.GetSection(StooqOptions.SectionName));
 
-        IHttpClientBuilder client = services
-            .AddHttpClient<IStockQuoteProvider, StooqClient>(StooqClient.HttpClientName, ConfigureStooqClient);
+        services
+            .AddOptions<FinnhubOptions>()
+            .Bind(configuration.GetSection(FinnhubOptions.SectionName));
 
-        client.AddStandardResilienceHandler().Configure(ConfigureStooqResilience);
+        string provider = configuration[StockQuoteProviderKey] ?? StooqProvider;
+
+        if (provider.Equals(FinnhubProvider, StringComparison.OrdinalIgnoreCase))
+        {
+            services
+                .AddHttpClient<IStockQuoteProvider, FinnhubClient>(FinnhubClient.HttpClientName, ConfigureFinnhubClient)
+                .AddStandardResilienceHandler()
+                .Configure(ConfigureFinnhubResilience);
+
+            return services;
+        }
+
+        if (!provider.Equals(StooqProvider, StringComparison.OrdinalIgnoreCase))
+        {
+            // Fail fast rather than silently falling back: a typo in the provider name would otherwise
+            // look like the alternative provider quietly not being used.
+            throw new InvalidOperationException(
+                $"{StockQuoteProviderKey} is \"{provider}\", which is not a known quote provider. "
+                + $"Use \"{StooqProvider}\" or \"{FinnhubProvider}\".");
+        }
+
+        services
+            .AddHttpClient<IStockQuoteProvider, StooqClient>(StooqClient.HttpClientName, ConfigureStooqClient)
+            .AddStandardResilienceHandler()
+            .Configure(ConfigureStooqResilience);
 
         return services;
     }
@@ -194,6 +234,30 @@ public static class DependencyInjection
     /// </summary>
     private static void ConfigureStooqClient(HttpClient client) =>
         client.MaxResponseContentBufferSize = StooqClient.MaxResponseBytes;
+
+    private static void ConfigureFinnhubClient(HttpClient client) =>
+        client.MaxResponseContentBufferSize = FinnhubClient.MaxResponseBytes;
+
+    /// <summary>Same shape as the Stooq pipeline, driven by <see cref="FinnhubOptions.TimeoutSeconds"/>.</summary>
+    private static void ConfigureFinnhubResilience(HttpStandardResilienceOptions resilience, IServiceProvider provider)
+    {
+        FinnhubOptions options = provider.GetRequiredService<IOptions<FinnhubOptions>>().Value;
+
+        TimeSpan budget = TimeSpan.FromSeconds(options.TimeoutSeconds);
+        TimeSpan perAttempt = budget / StooqClient.MaxAttemptsPerLookup;
+
+        resilience.TotalRequestTimeout.Timeout = budget;
+        resilience.AttemptTimeout.Timeout = perAttempt;
+        resilience.Retry.MaxRetryAttempts = StooqClient.MaxAttemptsPerLookup - 1;
+        resilience.Retry.Delay = TimeSpan.FromMilliseconds(StooqClient.RetryDelayMilliseconds);
+
+        TimeSpan minimumSamplingDuration = perAttempt * 2;
+
+        if (resilience.CircuitBreaker.SamplingDuration < minimumSamplingDuration)
+        {
+            resilience.CircuitBreaker.SamplingDuration = minimumSamplingDuration;
+        }
+    }
 
     private static void ConfigureStooqResilience(HttpStandardResilienceOptions resilience, IServiceProvider provider)
     {

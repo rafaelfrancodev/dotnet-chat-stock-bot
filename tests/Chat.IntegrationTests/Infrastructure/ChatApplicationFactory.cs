@@ -77,8 +77,22 @@ public sealed class ChatApplicationFactory : WebApplicationFactory<ChatHub>
         builder.UseEnvironment(Environments.Development);
 
         builder.ConfigureTestServices(services =>
+        {
             services.AddMassTransitTestHarness(configurator =>
-                configurator.SetTestTimeouts(BusTimeout, BusTimeout)));
+                configurator.SetTestTimeouts(BusTimeout, BusTimeout));
+
+            // Without this the host is "started" while the bus is still starting, because MassTransit's
+            // hosted service does not wait for it by default. A test that published in that window blocked
+            // until its own timeout — which is exactly the intermittent stall that only ever hit the three
+            // bus-dependent tests (`SendMessage did not answer within 30 seconds`) while the plain-message,
+            // history and authentication tests always passed. Waiting for the bus removes the race.
+            services.Configure<MassTransitHostOptions>(options =>
+            {
+                options.WaitUntilStarted = true;
+                options.StartTimeout = BusTimeout;
+                options.StopTimeout = BusTimeout;
+            });
+        });
     }
 
     /// <inheritdoc/>

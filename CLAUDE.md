@@ -1,6 +1,6 @@
 # CLAUDE.md — Chat + Stock Bot Challenge (.NET)
 
-Browser-based chat application (.NET backend challenge). Registered users chat in rooms via SignalR; a `/stock=stock_code` command triggers a **decoupled bot** that fetches a quote from Stooq and posts it back through **RabbitMQ**. Judged on backend quality: standards, attention to detail, reusability. Due: **Friday, August 7**.
+Browser-based chat application (.NET backend challenge). Registered users chat in rooms via SignalR; a `/stock=stock_code` command triggers a **decoupled bot** that fetches a quote and posts it back through **RabbitMQ**. Judged on backend quality: standards, attention to detail, reusability. Due: **Friday, August 7**.
 
 ## Challenge requirements (source of truth)
 
@@ -33,7 +33,7 @@ src/
   Chat.Application/     # Abstractions/ (8 ports), Behaviors/, Contracts/ (MessageDto, wire records). Features/ from 1.8.
   Chat.Infrastructure/  # ChatDbContext (EF Core + Identity), converters/configurations/migrations/repositories, MassTransit wiring, health checks, clock.
   Chat.Web/             # Composition root, Razor Pages, health endpoints. Identity UI from 1.11, SignalR hub from 1.12.
-  Chat.Bot/             # Web host serving /health only today; request consumer + Stooq worker from 1.15.
+  Chat.Bot/             # Request consumer + quote worker + /health. No persistence, ever.
 tests/
   Chat.UnitTests/       # 209 tests: domain, port shape, EF model and the generated read SQL.
   Chat.IntegrationTests/  # empty until 1.17.
@@ -41,7 +41,7 @@ tests/
 
 Dependency rule: Web/Bot → Infrastructure → Application → Domain. Never the other way. `AbstractionsTests` asserts the compiled `Chat.Application` assembly references no EF Core, MassTransit, ASP.NET Core or RabbitMQ.Client.
 
-Stock flow: hub → `PostMessageCommand` → parser detects `/stock=` → `RequestStockQuoteCommand` → publish `StockQuoteRequested` → Bot consumes on `stock-quote-requests` → Stooq CSV → publish `StockQuoteResolved` → Web consumes on `stock-quote-responses` → posts + broadcasts to the room as "Bot". The **command** is never written to the DB.
+Stock flow: hub → `PostMessageCommand` → parser detects `/stock=` → `RequestStockQuoteCommand` → publish `StockQuoteRequested` → Bot consumes on `stock-quote-requests` → quote provider → publish `StockQuoteResolved` → Web consumes on `stock-quote-responses` → posts + broadcasts to the room as "Bot". The **command** is never written to the DB.
 
 Messaging uses **MassTransit 8 over RabbitMQ**. MassTransit owns the exchange layout (one exchange per message type) and the `_error` / `_skipped` queues; we own the receive endpoint names `stock-quote-requests` / `stock-quote-responses`, prefetch and the retry policy, all in `Chat.Application/Contracts/Messaging/MessagingConstants.cs`. `AddMessaging(configuration, registerConsumers)` configures the bus; each host passes only its own consumers. The wire contracts (`StockQuoteRequested`, `StockQuoteResolved`) are plain records — no separate Contracts project. Persistence is EF Core + SQL Server 2022 (database `ChatDb`, run in Docker via `docker-compose.dev.yml`), sharing one `ChatDbContext` with Identity; `20260804190713_InitialCreate` is committed and applied. Bot quote answers **are** persisted (`MessageOrigin.Bot`) and then broadcast; only the `/stock=` command is never persisted. Full design: `docs/ARCHITECTURE.md`.
 
@@ -71,7 +71,7 @@ dotnet tool restore                           # once — pins dotnet-ef 10.0.10 
 docker compose -f docker-compose.dev.yml up -d   # SQL Server 2022 + RabbitMQ 4 (UI: http://localhost:15672)
 docker compose -f docker-compose.dev.yml ps      # wait for both to report (healthy)
 dotnet build                                  # 0 warnings expected (TreatWarningsAsErrors)
-dotnet test                                   # 209 unit tests; integration suite is still empty
+dotnet test                                   # 531 unit (hermetic) + 19 integration (needs Docker)
 dotnet format                                 # before committing
 dotnet format --verify-no-changes             # CI-style gate
 
@@ -110,6 +110,10 @@ dotnet user-secrets set "RabbitMq:UserName" "<from .env>" --project src/Chat.Web
 dotnet user-secrets set "RabbitMq:Password" "<from .env>" --project src/Chat.Web
 dotnet user-secrets set "RabbitMq:UserName" "<from .env>" --project src/Chat.Bot
 dotnet user-secrets set "RabbitMq:Password" "<from .env>" --project src/Chat.Bot
+
+# Quote provider — Chat.Bot only. Stooq is the default and needs no key.
+dotnet user-secrets set "Stocks:Provider" "Finnhub" --project src/Chat.Bot
+dotnet user-secrets set "Finnhub:ApiKey" "<free key from finnhub.io>" --project src/Chat.Bot
 ```
 
 ## Workflow (Claude Code)
@@ -126,14 +130,16 @@ Agents: `architect`, `implementer`, `test-engineer`, `code-reviewer`, `docs-main
 - Authoritative task list: `docs/PLAN.md` — each done task carries its design record, and later tasks must conform to it.
 - [x] Phase 0 (0.1–0.9): solution, build/package governance, compose stack, health checks, MassTransit.
 - [x] Phase 1 domain + persistence (1.1–1.7): message/room value objects, `ChatCommandParser`, `Message` and `ChatRoom` aggregates, the eight Application ports, EF Core + Identity model and the applied `InitialCreate` migration.
-- [ ] Phase 1 features (1.8–1.18): handlers, MassTransit publishers/endpoints, Identity + auth wiring, hub, chat page, Stooq client, bot worker, integration tests, manual end-to-end run. Nothing user-facing runs yet.
+- [x] Phase 1 mandatory (1.8–1.17): handlers, MassTransit publishers/endpoints, Identity + auth, hub, chat page with help panel, quote providers, bot worker, response consumer, integration suite. The full `/stock=` round trip works end to end.
+- [ ] 1.18 recorded manual walkthrough; bonuses 2.2 (multiple rooms), 2.4 (rate limit), 2.5 (installer).
 - [ ] Bonus features (see checklist above). `ApplicationUser` and the Identity tables exist from 1.7, but authentication and the UI are task 1.11 — the Identity bonus is not claimable yet.
 - [ ] README written and verified (task 3.1 — `README.md` does not exist yet).
 - [ ] Final review + delivery zip/repo (include `.git/`).
 
 ## Gotchas
 
-- Stooq returns `N/D` fields for unknown tickers — the bot must answer with a friendly "not found" message, not crash. Never build the Stooq URL from raw input: `StockCode.Create` already normalises to lower case and enforces `^[a-z0-9.\-]{1,20}$` (anchored `\A`/`\z`, because in .NET `$` also matches before a trailing newline).
+- **Two quote providers sit behind `IStockQuoteProvider`, chosen by `Stocks:Provider`**: `Stooq` (default) and `Finnhub` (needs `Finnhub:ApiKey`). Stooq's CSV endpoint is unreachable from a server — `/q/l/` is 404 and `/q/d/l/` serves a JavaScript proof-of-work browser check (429 on an unsolved `/__verify`). **Do not implement a solver for it**; that is circumventing an access control, and Finnhub exists because it is an API built for programmatic access. Verified live: `AAPL.US quote is $311.51 per share`.
+- Unknown symbol is a **friendly answer with no banner** (`SymbolNotFound`), and only a service failure raises the red banner (`LookupFailed`). Stooq signals it with `N/D` in a CSV row; Finnhub with HTTP 200 and every number zero. `Access denied` from Stooq is **not** an unknown symbol — measured returning identically for a valid ticker — so it is a refusal. Never build the Stooq URL from raw input: `StockCode.Create` already normalises to lower case and enforces `^[a-z0-9.\-]{1,20}$` (anchored `\A`/`\z`, because in .NET `$` also matches before a trailing newline).
 - Reviewers will open 2 browsers with 2 users: broadcast via SignalR groups per room, identity from claims (never from client payload).
 - `Messages` deliberately has **no foreign key at all**. The bot's author id `system:bot` is not an Identity user, so an FK to `AspNetUsers` would reject every quote answer the challenge requires; `ChatRoomId` is validated with `ExistsAsync` instead.
 - EF Core cannot translate member access on a value-converted type (`message.Content.Value`), so the "last 50" query projects raw columns into `MessageRepository.LatestMessageRow` and one in-memory loop reverses and unwraps them. Do not "simplify" it back into a `MessageDto` projection.

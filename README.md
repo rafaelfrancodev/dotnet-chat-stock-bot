@@ -2,9 +2,13 @@
 
 A browser chat application where registered users log in and talk in a chatroom over SignalR. Typing
 `/stock=aapl.us` is not a chat message: it is a command that is published to RabbitMQ, picked up by a
-**separate process** (`Chat.Bot`) that has no database access at all, resolved against Stooq's CSV quote
-endpoint, and published back so the web host posts the answer into the room as the **bot**. The command
-itself is never written to the database — only the bot's answer is.
+**separate process** (`Chat.Bot`) that has no database access at all, resolved against a quote service, and
+published back so the web host posts the answer into the room as the **bot**. The command itself is never
+written to the database — only the bot's answer is.
+
+Two quote providers ship behind one port: **Stooq** (the endpoint the challenge names, the default) and
+**Finnhub** (a keyed JSON API). Stooq's CSV endpoint became unreachable from a server while this was
+built, which is why the second one exists — see [Quote providers](#quote-providers--stooq-and-finnhub).
 
 ## Mandatory requirements and where they are
 
@@ -13,11 +17,11 @@ itself is never written to the database — only the bot's answer is.
 | Registered users log in and chat in a room | ASP.NET Core Identity (`src/Chat.Web/Areas/Identity`), `ChatHub` (`src/Chat.Web/Hubs/ChatHub.cs`) |
 | `/stock=stock_code` command | `ChatCommandParser` + `StockCode` (`src/Chat.Domain/StockCommands/`) |
 | Decoupled bot over RabbitMQ | `src/Chat.Bot` (no `AddPersistence()`, no SignalR, no reference to `Chat.Web`) |
-| Stooq CSV call and `"AAPL.US quote is $93.42 per share"` | `StooqClient` / `StooqCsvParser` (`src/Chat.Infrastructure/Stocks/`), `StockQuoteAnswer` |
+| Quote call and `"AAPL.US quote is $93.42 per share"` | `StooqClient` or `FinnhubClient` behind `IStockQuoteProvider` (`src/Chat.Infrastructure/Stocks/`), `StockQuoteAnswer` |
 | Post owner is the bot | `Message.PostByBot` — takes no author, uses `MessageAuthor.Bot` |
 | Ordered by timestamp, last 50 only | `MessageRepository.GetLatestAsync`, capped in `GetLatestMessagesValidator` |
 | The stock command is never persisted | Enforced structurally in four layers — see [Design decisions](#design-decisions) |
-| Unit tests | 514 tests in `tests/Chat.UnitTests`, plus 19 in `tests/Chat.IntegrationTests` |
+| Unit tests | 531 tests in `tests/Chat.UnitTests`, plus 19 in `tests/Chat.IntegrationTests` |
 
 ---
 
@@ -74,17 +78,60 @@ environment variables — `.env.example` has commented-out lines for the environ
 Use `127.0.0.1`, **never** `localhost`. The containers publish on the IPv4 loopback only, and on Windows
 `localhost` resolves to `::1` first, which costs a full 15-second SqlClient timeout before it falls back.
 
+Each host has its own secret store, keyed by the `UserSecretsId` in its `.csproj`
+(`chat-stock-bot-web` and `chat-stock-bot-worker`). What each one needs, and why:
+
+| Setting | `Chat.Web` | `Chat.Bot` | What it is |
+| --- | --- | --- | --- |
+| `ConnectionStrings:ChatDatabase` | **required** | — | SQL Server. The bot has no database *by design*, so it has no connection string |
+| `RabbitMq:UserName` / `RabbitMq:Password` | **required** | **required** | Both processes talk to the broker; that is the only thing they share |
+| `Stocks:Provider` | — | optional | `Stooq` (default) or `Finnhub` |
+| `Finnhub:ApiKey` | — | required *for Finnhub* | Free key from finnhub.io. Only the bot calls a quote service |
+
+**SQL Server — `Chat.Web` only:**
+
 ```bash
 dotnet user-secrets set "ConnectionStrings:ChatDatabase" "Server=127.0.0.1,1433;Database=ChatDb;User Id=sa;Password=<MSSQL_SA_PASSWORD from .env>;Encrypt=True;TrustServerCertificate=True" --project src/Chat.Web
-dotnet user-secrets set "RabbitMq:UserName" "<RABBITMQ_USER from .env>" --project src/Chat.Web
-dotnet user-secrets set "RabbitMq:Password" "<RABBITMQ_PASSWORD from .env>" --project src/Chat.Web
-dotnet user-secrets set "RabbitMq:UserName" "<RABBITMQ_USER from .env>" --project src/Chat.Bot
-dotnet user-secrets set "RabbitMq:Password" "<RABBITMQ_PASSWORD from .env>" --project src/Chat.Bot
 ```
 
 `TrustServerCertificate=True` is required locally: the container uses a self-signed certificate and
-Microsoft.Data.SqlClient encrypts by default. `Chat.Bot` gets broker credentials only — it has no
-connection string because it has no database.
+Microsoft.Data.SqlClient encrypts by default. Use `127.0.0.1`, never `localhost` — see the note above.
+
+**RabbitMQ — both hosts**, same credentials as `.env`:
+
+```bash
+dotnet user-secrets set "RabbitMq:UserName" "<RABBITMQ_USER from .env>"     --project src/Chat.Web
+dotnet user-secrets set "RabbitMq:Password" "<RABBITMQ_PASSWORD from .env>" --project src/Chat.Web
+dotnet user-secrets set "RabbitMq:UserName" "<RABBITMQ_USER from .env>"     --project src/Chat.Bot
+dotnet user-secrets set "RabbitMq:Password" "<RABBITMQ_PASSWORD from .env>" --project src/Chat.Bot
+```
+
+**Quote provider — `Chat.Bot` only.** Optional: Stooq is the default and needs no key. To use Finnhub
+instead, see [Quote providers](#quote-providers--stooq-and-finnhub):
+
+```bash
+dotnet user-secrets set "Stocks:Provider" "Finnhub"        --project src/Chat.Bot
+dotnet user-secrets set "Finnhub:ApiKey"  "<your-api-key>" --project src/Chat.Bot
+```
+
+**Checking and clearing:**
+
+```bash
+dotnet user-secrets list  --project src/Chat.Bot     # prints keys and values — mind your screen
+dotnet user-secrets clear --project src/Chat.Bot     # start over
+```
+
+**Environment variables instead of user-secrets** — for containers or CI, where `__` replaces the `:`:
+
+```bash
+ConnectionStrings__ChatDatabase=...   RabbitMq__UserName=...   RabbitMq__Password=...
+Stocks__Provider=Finnhub              Finnhub__ApiKey=...
+```
+
+Environment variables are the last configuration source added, so they override `appsettings.json` *and*
+user-secrets. Nothing here belongs in a committed file: `appsettings.json` ships empty placeholders, and
+`AddPersistence` throws at startup if the connection string is missing rather than failing later on the
+first message.
 
 **5. Build.**
 
@@ -156,10 +203,15 @@ A dismissible **help panel** at the top of the chat page explains all of this in
    - An unknown command (`/help`) or a rejected ticker (`/stock=a&b`) shows a red `not sent — …` line to
      the sender alone. Neither reaches the room.
    - A message from **`Bot`** appears in **both** windows.
-   - With Stooq's CSV endpoint reachable, that message reads `AAPL.US quote is $93.42 per share`.
-     As measured today it is not reachable, so the bot answers
-     `I could not reach the quote service, so I have no price for AAPL.US right now.` and the window
-     that asked also gets a red banner. See [A note about Stooq](#a-note-about-stooq).
+   - **With `Stocks:Provider=Finnhub` configured**, that message reads
+     `AAPL.US quote is $311.51 per share` — a real price. Verified end to end on 2026-08-06.
+   - **On the default Stooq provider**, its CSV endpoint is no longer reachable from a server, so the bot
+     answers `I could not reach the quote service, so I have no price for AAPL.US right now.` and the
+     window that asked also gets a red banner. Both paths are correct behaviour; see
+     [Quote providers](#quote-providers--stooq-and-finnhub).
+   - Try `/stock=zzzznotreal.us` too: an unknown symbol gets a friendly
+     `Sorry, I could not find a quote for ZZZZNOTREAL.US.` and **no** banner, because the service is
+     working — only a service failure raises the banner.
 5. Type an unknown command such as `/help`. Only the window that typed it sees an error
    (`Unknown command. The only command available is /stock=<code>, for example /stock=aapl.us.`); the
    room sees nothing and nothing is stored.
@@ -200,9 +252,9 @@ job — consuming requests and answering politely — still works.
 dotnet test
 ```
 
-**533 tests, all passing** — 514 unit tests and 19 integration tests.
+**550 tests, all passing** — 531 unit tests and 19 integration tests.
 
-`tests/Chat.UnitTests` (514) is **hermetic**: no containers, no broker, no network access, about three
+`tests/Chat.UnitTests` (531) is **hermetic**: no containers, no broker, no network access, about three
 seconds. Database behaviour is covered by translating EF Core queries offline (`ToQueryString()`) and by
 SQLite in process memory where a real unique index is needed; messaging is covered by MassTransit's
 in-memory `ITestHarness`; Stooq is covered by a stubbed `HttpMessageHandler` pointed at a
@@ -330,6 +382,68 @@ the bot, or at a chosen instant. Broadcasts always target a room group — `ICha
 renders, capped server-side so no client can widen it, served by `IX_Messages_ChatRoomId_PostedAtUtc`. No
 per-connection server state is kept: a reconnect re-joins from the client rather than being restored from
 an unbounded map.
+
+---
+
+## Quote providers — Stooq and Finnhub
+
+The bot reads prices through one port, `IStockQuoteProvider`, with **two interchangeable
+implementations**. Which one runs is a single configuration value; nothing else in the application
+changes, and neither the domain, the messaging, the hub nor the UI knows the difference.
+
+| `Stocks:Provider` | Implementation | Endpoint | Needs a key |
+| --- | --- | --- | --- |
+| `Stooq` *(default)* | `StooqClient` + `StooqCsvParser` | `https://stooq.com/q/d/l/?s={code}&i=d` — CSV | no |
+| `Finnhub` | `FinnhubClient` + `FinnhubQuoteParser` | `https://finnhub.io/api/v1/quote` — JSON | yes |
+
+```bash
+# Stooq is the default and needs nothing. To use Finnhub instead:
+dotnet user-secrets set "Stocks:Provider" "Finnhub"        --project src/Chat.Bot
+dotnet user-secrets set "Finnhub:ApiKey"  "<your-api-key>" --project src/Chat.Bot
+```
+
+A free key from [finnhub.io](https://finnhub.io) is enough. Only `Chat.Bot` needs either setting — it is
+the only process that calls a quote service. A misspelled provider name fails at startup rather than
+silently falling back, so a typo cannot look like the alternative quietly not being used.
+
+### Why Finnhub exists in this project
+
+The challenge names Stooq's CSV endpoint, and that is still the default. It stopped being usable from a
+server while this was being built, in two stages — both measured, both recorded below in
+[A note about Stooq](#a-note-about-stooq):
+
+1. The documented single-quote path `/q/l/?s=…&f=sd2t2ohlcv&h&e=csv` now answers **404**.
+2. The surviving daily-history path `/q/d/l/?s=…&i=d` answers **200 with a JavaScript
+   proof-of-work "verify your browser" page** to any client that is not a browser session which has
+   already solved it. A browser passes it invisibly, which is why the file downloads by hand; an
+   `HttpClient` receives the challenge instead.
+
+Solving that proof-of-work in the bot was considered and **deliberately not done**. It exists to keep
+automated clients out — `POST /__verify` with an unsolved nonce answers `429`, so it is enforced
+server-side — and defeating it would be both a circumvention of the site's access control and a brittle
+thing to hand a reviewer, breaking the moment the difficulty or format changes.
+
+Finnhub is the honest answer to the same problem: an API **built for programmatic access**, which answers
+an `HttpClient` by design and authenticates with a key instead of a browser check. Adding it cost one
+adapter, because `IStockQuoteProvider` was designed as a port from the start — the seam was already there.
+
+Verified live on 2026-08-06 with `Stocks:Provider=Finnhub`, driven through the real chat:
+
+```
+/stock=aapl.us          -> Bot: AAPL.US quote is $311.51 per share
+/stock=msft.us          -> Bot: MSFT.US quote is $496.18 per share
+/stock=zzzznotreal.us   -> Bot: Sorry, I could not find a quote for ZZZZNOTREAL.US.
+```
+
+The last line matters: an unknown symbol is a friendly answer with **no** red banner, because the service
+is working. Finnhub signals it with HTTP 200 and every number zero — its equivalent of Stooq's `N/D`.
+
+Two details the adapter handles:
+
+- **Symbol translation.** The chat uses Stooq-style tickers; Finnhub names US listings without a suffix.
+  `aapl.us` becomes `AAPL`, while other markets keep theirs (`shop.to` stays `SHOP.TO`).
+- **A rejected key is logged as an error, not a warning.** A `401`/`403` is a configuration mistake an
+  operator must fix, unlike a transient failure that will pass on its own.
 
 ---
 
