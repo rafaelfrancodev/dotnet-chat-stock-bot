@@ -169,8 +169,12 @@ public sealed class StockQuoteResolutionTests
                 configurator => configurator.AddStockQuoteRequestConsumer<StockQuoteRequestConsumer>());
             services.AddStockQuotes(configuration);
 
+            // Long on purpose, and bounded by the caller instead — see ChatApplicationFactory.HarnessTimeout
+            // for the harness deadlock this avoids.
             services.AddMassTransitTestHarness(configurator =>
-                configurator.SetTestTimeouts(ChatApplicationFactory.BusTimeout, ChatApplicationFactory.BusTimeout));
+                configurator.SetTestTimeouts(
+                    ChatApplicationFactory.HarnessTimeout,
+                    ChatApplicationFactory.HarnessTimeout));
 
             StubHandler handler = new(status, body);
 
@@ -197,12 +201,19 @@ public sealed class StockQuoteResolutionTests
 
             await bus.Bus.Publish(request);
 
-            (await bus.Published.Any<StockQuoteResolved>()).Should().BeTrue(
-                "the bot must answer every request it accepts");
+            // Bounded by a token of our own, and matched on the request id in the filter rather than by
+            // scanning afterwards, so both calls stop at the message this invocation is waiting for. See
+            // ChatServerFixture.PublishedAsync: waiting on the harness's own timer instead is what hangs.
+            using CancellationTokenSource wait = new(ChatApplicationFactory.BusTimeout);
+
+            (await bus.Published.Any<StockQuoteResolved>(
+                context => context.Context.Message.RequestId == request.RequestId,
+                wait.Token))
+                .Should().BeTrue("the bot must answer every request it accepts");
 
             return bus.Published
-                .Select<StockQuoteResolved>()
-                .First(message => message.Context.Message.RequestId == request.RequestId)
+                .Select<StockQuoteResolved>(context => context.Context.Message.RequestId == request.RequestId)
+                .First()
                 .Context.Message;
         }
 

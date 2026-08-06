@@ -39,6 +39,27 @@ public sealed class ChatApplicationFactory : WebApplicationFactory<ChatHub>
     public static readonly TimeSpan BusTimeout = TimeSpan.FromSeconds(15);
 
     /// <summary>
+    /// What the harness itself is told, as opposed to what a single assertion waits for.
+    /// </summary>
+    /// <remarks>
+    /// <b>Deliberately far longer than any run.</b> The harness is started once per collection, so its
+    /// inactivity timer is armed for the whole suite rather than for one test — and when it fires while a
+    /// test is enumerating <c>Published</c>, MassTransit 8.5.10 deadlocks: measured with two stacks, the test
+    /// thread holds <c>AsyncElementList</c>'s lock inside the enumerator's <c>finally</c> and blocks in
+    /// <c>CancellationTokenSource.Registrations.WaitForCallbackToComplete</c>, while the timer thread runs
+    /// <c>AsyncInactivityObserver.NoActivity</c> into that list's cancel callback and blocks on
+    /// <c>Monitor.Enter</c> for the same lock. Neither side can proceed and the test hangs until xUnit's
+    /// timeout kills it.
+    /// <para>
+    /// Making the timer unreachable is what closes that window. It costs no coverage, because every wait a
+    /// test performs is bounded by <see cref="BusTimeout"/> through a token the test owns — see
+    /// <c>ChatServerFixture.PublishedAsync</c>. Cancellation therefore only ever comes from us, at a moment
+    /// no enumeration is in progress.
+    /// </para>
+    /// </remarks>
+    public static readonly TimeSpan HarnessTimeout = TimeSpan.FromMinutes(30);
+
+    /// <summary>
     /// The configuration key <c>AddPersistence</c> reads, in its environment-variable spelling.
     /// </summary>
     private const string ConnectionStringVariable = "ConnectionStrings__ChatDatabase";
@@ -80,7 +101,7 @@ public sealed class ChatApplicationFactory : WebApplicationFactory<ChatHub>
         // ChatServerFixture must call harness.Start() — building the host is not enough.
         builder.ConfigureTestServices(services =>
             services.AddMassTransitTestHarness(configurator =>
-                configurator.SetTestTimeouts(BusTimeout, BusTimeout)));
+                configurator.SetTestTimeouts(HarnessTimeout, HarnessTimeout)));
     }
 
     /// <inheritdoc/>

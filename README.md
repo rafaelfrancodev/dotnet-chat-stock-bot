@@ -604,36 +604,36 @@ the UI to drive them; today the chat page always opens the seeded `General` room
 
 ## Known issues
 
-**The integration suite can stall on the first run after a build.** When it happens, the three tests that
-publish to the message bus hang until their backstop and the run reports three failures with
-`SendMessage did not answer within 30 seconds`. **Running it again passes** — measured 19/19 in 18–27
-seconds on three consecutive runs after the failing first one. If you hit it, re-run:
+**The integration suite used to stall, and no longer does.** The symptom was that the tests reading the
+message bus hung until their backstop, reporting `Test execution timed out` or `SendMessage did not answer
+within 30 seconds`. It is fixed; the suite now runs 19/19 in 4–14 seconds, and the cause is worth recording
+because the trap is easy to walk into with MassTransit's test harness.
 
-```bash
-dotnet test tests/Chat.UnitTests           # 539, hermetic, ~3 s
-dotnet test tests/Chat.IntegrationTests    # 19, needs Docker, ~20 s
-```
+`harness.Published` is a **live list, not a snapshot**. Enumerating it blocks in `Monitor.Wait` until the
+harness decides nothing more is coming, which it only does when its inactivity timer fires. So any
+assertion that must see the *end* of the sequence — anything reaching `ToList`, which includes
+FluentAssertions' `ContainSingle` — waits for that timer by construction. Worse, when the timer fires while
+the enumeration is in flight, MassTransit 8.5.10 deadlocks. Two thread stacks, captured with `dotnet-stack`
+during a hang, show both halves: the test thread inside `AsyncElementList`'s enumerator holds its lock and
+blocks in `CancellationTokenSource.WaitForCallbackToComplete`, while the timer thread runs
+`AsyncInactivityObserver.NoActivity` into that same list's cancel callback and blocks on `Monitor.Enter`.
+Neither side can advance.
 
-Two real causes were found and fixed along the way, which is why it went from frequent to a cold-start
-only: `AddMassTransitTestHarness` replaces MassTransit's hosted service, so building the host does **not**
-start the bus and the fixture has to call `harness.Start()` — without it a publish waited forever; and
-xUnit parallelises test *collections*, which put a second in-memory bus beside the collection that owns the
-SQL Server container, so `xunit.runner.json` now runs the assembly sequentially. A residual cold-start
-stall remains and is **not** claimed as understood. Every wait inside these tests is individually bounded
-and names what stalled — the hub connect, the invocation, or the push — so a recurrence reports where it
-stopped rather than only that the test ran out of time.
+The fix is `ChatServerFixture.PublishedAsync`, now the only way these tests read the bus. It waits with
+`Any`, whose task completes as soon as a match arrives, on a cancellation token the test owns — so a wiring
+mistake still fails in seconds — and then takes the first element, which is already present and returns
+without waiting. Nothing enumerates to the end, so the timer is never involved. Cardinality moved to where
+it can be proved deterministically: `RequestStockQuoteHandlerTests` asserts `Received(1)`.
+
+Two earlier causes were found and fixed on the way to this one, both still worth knowing:
+`AddMassTransitTestHarness` replaces MassTransit's hosted service, so building the host does **not** start
+the bus and the fixture must call `harness.Start()`; and xUnit parallelises test *collections*, which put a
+second in-memory bus beside the collection owning the SQL Server container, so `xunit.runner.json` runs the
+assembly sequentially.
 
 Two traps worth knowing while diagnosing: an interrupted run can leave a `testhost` process holding the
 test DLLs, which makes the *build* fail with `MSB3027 … locked by testhost` — kill stray `testhost`
 processes; and a `dotnet run` left over from a previous session will hold port 5271 or 5299.
-
-Every wait inside those tests is individually bounded and names what stalled — the hub connect, the
-invocation, or the push — so a recurrence reports where it stopped rather than only that the test ran out
-of time. `tests.runsettings` also serialises the two test hosts, which reduces contention but did not
-eliminate it. Two things worth knowing while diagnosing: an interrupted run can leave a `testhost` process
-holding the test DLLs, which then makes the *build* fail with `MSB3027 … locked by testhost` — kill stray
-`testhost` processes if that happens; and a `dotnet run` left over from a previous session will hold
-port 5271 or 5299.
 
 ---
 

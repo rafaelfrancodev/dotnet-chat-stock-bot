@@ -1,7 +1,6 @@
 using Chat.Application.Contracts.Messages;
 using Chat.Application.Contracts.Messaging;
 using Chat.IntegrationTests.Infrastructure;
-using MassTransit.Testing;
 
 namespace Chat.IntegrationTests;
 
@@ -27,17 +26,12 @@ public sealed class StockCommandTests(ChatServerFixture fixture)
 
         await client.SendMessageAsync(roomId, StockCommand);
 
-        bool published = await fixture.Broker.Published.Any<StockQuoteRequested>(
-            context => context.Context.Message.ChatRoomId == roomId);
-
-        published.Should().BeTrue("the bot is reached through the broker, not by an in-process call");
-
-        StockQuoteRequested request = fixture.Broker.Published
-            .Select<StockQuoteRequested>(context => context.Context.Message.ChatRoomId == roomId)
-            .Select(context => context.Context.Message)
-            .Should()
-            .ContainSingle("one command produces exactly one request")
-            .Subject;
+        // Reaching the broker at all is the assertion: the bot is a separate process, so an in-process call
+        // would pass every other test in this file and still break the challenge's decoupling requirement.
+        // One request per command is proved by RequestStockQuoteHandlerTests with Received(1) — see
+        // ChatServerFixture.PublishedAsync for why cardinality is not re-proved against a live bus list.
+        StockQuoteRequested request = await fixture.PublishedAsync<StockQuoteRequested>(
+            message => message.ChatRoomId == roomId);
 
         request.StockCode.Should().Be(NormalisedStockCode);
         request.RequestedByUserId.Should().Be(aliceUserId, "identity comes from the ticket, never from the payload");
@@ -57,8 +51,7 @@ public sealed class StockCommandTests(ChatServerFixture fixture)
 
         // Waiting on the published request is what makes this deterministic: the command has finished being
         // handled, so "no row" is an outcome and not a race.
-        await fixture.Broker.Published.Any<StockQuoteRequested>(
-            context => context.Context.Message.ChatRoomId == roomId);
+        await fixture.PublishedAsync<StockQuoteRequested>(message => message.ChatRoomId == roomId);
 
         (await fixture.CountMessagesAsync(roomId)).Should()
             .Be(0, "a stock command is a command, never a post: the room must hold nothing");

@@ -135,6 +135,58 @@ public sealed class ChatServerFixture : IAsyncLifetime
     public HttpClient CreateAnonymousClient() => Application.CreateDefaultClient(new CookieJarHandler());
 
     /// <summary>
+    /// Waits for one message of type <typeparamref name="T"/> matching <paramref name="match"/> to be
+    /// published on the bus, and returns it.
+    /// </summary>
+    /// <typeparam name="T">The published contract to wait for.</typeparam>
+    /// <param name="match">Identifies the message this test is responsible for, usually by room.</param>
+    /// <returns>The matching message.</returns>
+    /// <exception cref="TimeoutException">Nothing matched within <c>BusTimeout</c>.</exception>
+    /// <remarks>
+    /// <b>The single way these tests read the bus, because reading it naively hangs.</b>
+    /// <c>harness.Published</c> is a live list, not a snapshot: enumerating it blocks in
+    /// <c>Monitor.Wait</c> until the harness decides no further message is coming, which it only does when
+    /// its inactivity timer fires. So an assertion that has to see the <i>end</i> of the sequence — anything
+    /// reaching <c>ToList</c>, which includes FluentAssertions' <c>ContainSingle</c> and <c>HaveCount</c> —
+    /// waits for that timer by construction, and deadlocks if it fires mid-enumeration. Both halves were
+    /// measured from thread stacks; <see cref="ChatApplicationFactory.HarnessTimeout"/> records the deadlock.
+    /// <para>
+    /// This method therefore never enumerates to the end. It waits with <c>Any</c>, whose task completes as
+    /// soon as a match arrives, on a token <i>we</i> own so a wiring mistake still fails in seconds. Only
+    /// then does it take the first element, which is already present and so returns without waiting.
+    /// </para>
+    /// <para>
+    /// <b>Cardinality is deliberately not asserted here.</b> "One command publishes exactly one request" is
+    /// proved deterministically by <c>RequestStockQuoteHandlerTests</c> with <c>Received(1)</c>, and needs no
+    /// timer. What only an integration test can show is what this returns: the message really crossed the
+    /// bus, carrying the payload the bot will read.
+    /// </para>
+    /// </remarks>
+    public async Task<T> PublishedAsync<T>(Func<T, bool> match)
+        where T : class
+    {
+        ArgumentNullException.ThrowIfNull(match);
+
+        using CancellationTokenSource wait = new(ChatApplicationFactory.BusTimeout);
+
+        bool published = await Broker.Published
+            .Any<T>(context => match(context.Context.Message), wait.Token)
+            .ConfigureAwait(false);
+
+        if (!published)
+        {
+            throw new TimeoutException(
+                $"No {typeof(T).Name} matching the filter was published within "
+                + $"{ChatApplicationFactory.BusTimeout.TotalSeconds:0} seconds.");
+        }
+
+        return Broker.Published
+            .Select<T>(context => match(context.Context.Message))
+            .First()
+            .Context.Message;
+    }
+
+    /// <summary>
     /// A participant with a unique account name, not yet registered — for the test that walks the
     /// registration and login pages itself.
     /// </summary>
