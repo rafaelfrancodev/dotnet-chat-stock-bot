@@ -15,6 +15,9 @@ public sealed class StooqCsvParserTests
     private const string QuoteRow = "AAPL.US,2026-08-04,21:00:00,205.1,207.2,204.4,206.55,42193021";
     private const string NotFoundRow = "ZZZZ.US,N/D,N/D,N/D,N/D,N/D,N/D,N/D";
 
+    /// <summary>Header of the daily-history download served by <c>/q/d/l/</c>.</summary>
+    private const string HistoryHeader = "Date,Open,High,Low,Close,Volume";
+
     [Fact]
     public void Parse_ValidRow_ReturnsClosePrice()
     {
@@ -34,6 +37,51 @@ public sealed class StooqCsvParserTests
         StockQuoteLookup lookup = StooqCsvParser.Parse($"{Header}\n{QuoteRow}");
 
         lookup.Price.Should().Be(206.55m, "the Close column is 206.55; Open/High/Low/Volume are not");
+    }
+
+    /// <summary>
+    /// The daily-history download (<c>/q/d/l/?s=aa.us</c>) returns one line per session, oldest first, so
+    /// the quote is the <b>last</b> row — not the first, which would report a price from months ago.
+    /// </summary>
+    [Fact]
+    public void Parse_DailyHistory_ReturnsTheCloseOfTheNewestSession()
+    {
+        string csv = string.Join(
+            '\n',
+            HistoryHeader,
+            "2026-08-03,46.10,46.55,45.90,46.20,3110022",
+            "2026-08-04,46.83,47.12,46.40,46.83,3912004",
+            "2026-08-05,46.90,47.85,46.88,47.69,4910000");
+
+        StockQuoteLookup lookup = StooqCsvParser.Parse(csv);
+
+        lookup.Outcome.Should().Be(StockQuoteOutcome.Quoted);
+        lookup.Price.Should().Be(47.69m, "the newest session closed at 47.69, not the first row's 46.20");
+    }
+
+    /// <summary>A history with a single session behaves like the single-quote response.</summary>
+    [Fact]
+    public void Parse_DailyHistoryWithOneSession_ReturnsThatClose()
+    {
+        StockQuoteLookup lookup = StooqCsvParser.Parse($"{HistoryHeader}\r\n2026-08-05,46.90,47.85,46.88,47.69,4910000\r\n");
+
+        lookup.Price.Should().Be(47.69m);
+    }
+
+    /// <summary>
+    /// A truncated newest row is a failed lookup, not an excuse to quote the previous session: reporting
+    /// an older close as the current price would be worse than reporting no price at all.
+    /// </summary>
+    [Fact]
+    public void Parse_DailyHistoryWithATruncatedNewestRow_ReturnsLookupFailed()
+    {
+        string csv = string.Join(
+            '\n',
+            HistoryHeader,
+            "2026-08-04,46.83,47.12,46.40,46.83,3912004",
+            "2026-08-05,46.90,47.85");
+
+        StooqCsvParser.Parse(csv).Outcome.Should().Be(StockQuoteOutcome.LookupFailed);
     }
 
     /// <summary>

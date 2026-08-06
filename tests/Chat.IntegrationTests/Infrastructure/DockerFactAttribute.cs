@@ -17,7 +17,14 @@ public sealed class DockerFactAttribute : FactAttribute
     /// <c>HubConnection.InvokeAsync</c> has no timeout of its own — so this is the backstop that turns a
     /// wedged server into a failure a reviewer can read instead of a build that never ends.
     /// </summary>
-    public const int TimeoutMilliseconds = 60_000;
+    /// <remarks>
+    /// Raised from 60 s after a cold first run (freshly built, Docker not warm) failed three tests on the
+    /// timeout while eight consecutive warm runs passed in 16 s. Every wait inside a test is now bounded
+    /// individually — <see cref="TestHubClient.InvokeTimeout"/> and
+    /// <see cref="TestHubClient.PushTimeout"/> — so this is only the outer backstop, and a generous one
+    /// costs nothing on a healthy machine while removing a spurious red on a slow one.
+    /// </remarks>
+    public const int TimeoutMilliseconds = 180_000;
 
     /// <summary>Creates the attribute, skipping the test when Docker cannot be reached.</summary>
     public DockerFactAttribute()

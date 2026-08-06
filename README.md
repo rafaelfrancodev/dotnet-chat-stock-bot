@@ -194,9 +194,9 @@ job — consuming requests and answering politely — still works.
 dotnet test
 ```
 
-**514 tests, all passing** — 503 unit tests and 11 integration tests.
+**517 tests, all passing** — 506 unit tests and 11 integration tests.
 
-`tests/Chat.UnitTests` (503) is **hermetic**: no containers, no broker, no network access, about three
+`tests/Chat.UnitTests` (506) is **hermetic**: no containers, no broker, no network access, about three
 seconds. Database behaviour is covered by translating EF Core queries offline (`ToQueryString()`) and by
 SQLite in process memory where a real unique index is needed; messaging is covered by MassTransit's
 in-memory `ITestHarness`; Stooq is covered by a stubbed `HttpMessageHandler` pointed at a
@@ -337,8 +337,27 @@ Measured from this machine on **2026-08-05**:
 | the same URL with a desktop-browser `User-Agent` | **404**, `text/html` |
 | the same path on `https://stooq.pl/` | **404**, `text/html` |
 | `GET https://stooq.com/` | **200** |
+| `GET https://stooq.com/q/d/l/?s=aa.us` (daily history) | **200**, but `text/html` — a browser-verification page, not CSV |
+| the same, with a browser `User-Agent`, cookie jar and redirects followed | **200**, `text/html` — the same page |
 
-The CSV endpoint the challenge specifies no longer exists. The site is up; that route is gone.
+Two separate things are going on.
+
+**The single-quote path the challenge documents (`/q/l/`) has been withdrawn** — it answers 404 while the
+site itself answers 200.
+
+**The daily-history download (`/q/d/l/`) still exists, but is behind a browser check.** It answers 200 with
+a page containing `This site requires JavaScript to verify your browser` plus a script that computes a
+SHA-256 proof-of-work, POSTs the nonce to `/__verify`, and only then reloads to receive the CSV. A browser
+does that automatically, which is why the download works interactively. An `HttpClient` receives the
+challenge page instead. Solving that proof-of-work in the bot is not implemented: it exists specifically to
+keep automated clients out, so defeating it is not the right answer to a broken endpoint.
+
+What *is* implemented: `Stooq:QuotePath` now defaults to `q/d/l/?s={0}`, and `StooqCsvParser` understands
+**both** response shapes — the single `Symbol,Date,Time,Open,High,Low,Close,Volume` row and the daily
+history's `Date,Open,High,Low,Close,Volume` with one line per session, from which it reads the **newest**
+row. So the moment the endpoint is reachable — from a network that is not challenged, if Stooq lifts the
+check, or through any endpoint you point `Stooq:BaseAddress` at — the quote path works with no code change.
+`IStockQuoteProvider` is the seam for swapping in a different provider entirely.
 
 Consequence for a reviewer: `/stock=aapl.us` exercises the graceful-failure path rather than the quote
 path. The room gets `I could not reach the quote service, so I have no price for AAPL.US right now.`
@@ -346,12 +365,11 @@ posted by `Bot`, and the participant who asked also gets a red banner
 (`The stock quote service (Stooq) is not responding right now. Please try again in a couple of minutes.`).
 Nothing crashes, nothing is dead-lettered, and `/health` stays 200 on both hosts.
 
-The success path is fully implemented and unit-tested against the CSV format the challenge documents:
-`StooqCsvParser` locates the price by **header name** rather than column position, `N/D` maps to
-"symbol not found", and `StockQuoteAnswer.Quoted` produces exactly `AAPL.US quote is $93.42 per share`
-(invariant culture, so a de-DE machine does not post `$93,42`). Both the endpoint and the query path are
-configuration — `Stooq:BaseAddress` and `Stooq:QuotePath` in `src/Chat.Bot/appsettings.json` — so the
-client can be repointed at a working endpoint without a code change.
+The success path is fully implemented and unit-tested against both documented CSV shapes:
+`StooqCsvParser` locates the price by **header name** rather than column position, reads the newest row of
+a multi-session history, treats a truncated newest row as a failed lookup rather than quoting an older
+session, maps `N/D` to "symbol not found", and `StockQuoteAnswer.Quoted` produces exactly
+`AAPL.US quote is $93.42 per share` (invariant culture, so a de-DE machine does not post `$93,42`).
 
 ---
 

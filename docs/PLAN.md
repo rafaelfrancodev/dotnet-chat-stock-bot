@@ -1069,6 +1069,35 @@ Tests (11, all `[DockerFact]`, one collection):
 - `TwoParticipantTests` (1): `SendMessage_TwoParticipantsInTheSameRoom_EachSeesBothLinesInTheSameOrder` — the
   reviewer's two browsers, each line stored once.
 
+### [x] 1.17a Bound every hub call, and follow Stooq's surviving CSV endpoint
+Files: `tests/Chat.IntegrationTests/Infrastructure/{TestHubClient,DockerFactAttribute}.cs`, `src/Chat.Infrastructure/Stocks/{StooqCsvParser,StooqOptions}.cs`, `src/Chat.Bot/appsettings.json`, `tests/Chat.UnitTests/Infrastructure/Stocks/*`, `README.md`
+
+**Integration-suite diagnosability.** One solution-wide run failed 3 tests at ~60 s each; nine runs since
+have passed (16–25 s), including a cold run after deleting `bin`/`obj`, so the cause was not reproduced.
+What *was* wrong regardless: `HubConnection.InvokeAsync` has no timeout, so a stalled call consumed the
+whole per-test budget and surfaced as an unattributed "test exceeded 60 seconds".
+- `JoinRoom`/`SendMessage` now run under `TestHubClient.InvokeTimeout` (30 s) and report which hub method
+  stalled. `PushTimeout` 15 s → 30 s; the `[DockerFact]` backstop 60 s → 180 s, now that every wait inside
+  a test is individually bounded.
+- **Not claimed as a fix for the flake** — the failure was never reproduced. It is claimed as: a future
+  occurrence names the call that hung instead of the test that ran out of time, and a slow machine no
+  longer fails for being slow.
+
+**Stooq's endpoint.** `/q/l/` is withdrawn (404 + HTML). `/q/d/l/?s=aa.us` — the daily-history download —
+still exists, so `Stooq:QuotePath` now defaults to it and the parser understands both shapes:
+- The single-quote row `Symbol,Date,Time,Open,High,Low,Close,Volume`, and the history's
+  `Date,Open,High,Low,Close,Volume` with one line per session. **The last data line is read** — the only
+  row in the first shape, the newest session in the second.
+- A truncated newest row is `LookupFailed`, deliberately not a fallback to the previous session: an older
+  close presented as the current price would be worse than no price.
+- **`/q/d/l/` is behind a JavaScript proof-of-work browser check** (measured: 200 + a `/__verify` challenge
+  page, unchanged by a browser User-Agent, a cookie jar or following redirects). Solving it is not
+  implemented — it exists to keep automated clients out. So the live path is still `LookupFailed`; the
+  quote path works the moment the endpoint is reachable, with no code change.
+Unit tests: `Parse_DailyHistory_ReturnsTheCloseOfTheNewestSession`,
+`Parse_DailyHistoryWithOneSession_ReturnsThatClose`,
+`Parse_DailyHistoryWithATruncatedNewestRow_ReturnsLookupFailed`.
+
 ### [ ] 1.18 Verify the end-to-end flow manually and record it
 Files: `docs/ARCHITECTURE.md` (adjust if reality differs)
 Acceptance:

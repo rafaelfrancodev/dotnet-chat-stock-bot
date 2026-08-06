@@ -9,14 +9,26 @@ namespace Chat.Infrastructure.Stocks;
 /// is covered by fast tests instead of by a live call.
 /// </summary>
 /// <remarks>
-/// The response to <c>?f=sd2t2ohlcv&amp;h&amp;e=csv</c> is a header line plus one data line:
+/// Two response shapes are supported, because Stooq serves the quote under two different paths.
+/// <para>
+/// <c>/q/l/?f=sd2t2ohlcv&amp;h&amp;e=csv</c> — a header and a single data line:
 /// <code>
 /// Symbol,Date,Time,Open,High,Low,Close,Volume
 /// AAPL.US,2026-08-04,21:00:00,205.1,207.2,204.4,206.55,42193021
 /// </code>
-/// The price is read by locating the <see cref="PriceColumn"/> header, never by its position: the column
-/// order follows the <c>f=</c> parameter, and a positional read would silently quote the wrong number if
-/// that parameter were ever edited.
+/// </para>
+/// <para>
+/// <c>/q/d/l/?s=aa.us</c> — the daily history, a header and one line per session, oldest first:
+/// <code>
+/// Date,Open,High,Low,Close,Volume
+/// 2026-08-04,46.83,47.12,46.40,46.83,3912004
+/// 2026-08-05,46.90,47.85,46.88,47.69,4910000
+/// </code>
+/// </para>
+/// The <b>last</b> data line is the one read, which is the only line in the first shape and the newest
+/// session in the second. The price comes from locating the <see cref="PriceColumn"/> header, never from a
+/// fixed position: the column order follows the request, and a positional read would silently quote the
+/// wrong number the moment the path or the <c>f=</c> parameter changed.
 /// </remarks>
 internal static class StooqCsvParser
 {
@@ -57,7 +69,11 @@ internal static class StooqCsvParser
         }
 
         string[] header = lines[0].Split(FieldSeparator);
-        string[] row = lines[1].Split(FieldSeparator);
+
+        // The newest session, and the only row when the single-quote path answered. Deliberately not a
+        // scan backwards for the first parsable row: if the latest line is unusable, the honest answer is
+        // "no price" rather than yesterday's close presented as today's quote.
+        string[] row = lines[^1].Split(FieldSeparator);
         int priceIndex = Array.FindIndex(header, IsPriceColumn);
 
         // A row that does not line up with its own header is not a quote we can read, whatever it is.

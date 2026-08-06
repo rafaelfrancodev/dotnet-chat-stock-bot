@@ -141,7 +141,7 @@ public sealed class AddStockQuotesTests
         StooqOptions defaults = new();
 
         defaults.BaseAddress.Should().Be(new Uri("https://stooq.com/"));
-        defaults.QuotePath.Should().Be("q/l/?s={0}&f=sd2t2ohlcv&h&e=csv");
+        defaults.QuotePath.Should().Be("q/d/l/?s={0}");
         defaults.TimeoutSeconds.Should().Be(10);
     }
 

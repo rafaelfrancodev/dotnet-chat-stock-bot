@@ -21,7 +21,17 @@ public sealed class TestHubClient : IAsyncDisposable
     /// How long a test waits for a push before failing. Generous enough for a cold in-memory host, short
     /// enough that a broken broadcast fails the suite in seconds.
     /// </summary>
-    public static readonly TimeSpan PushTimeout = TimeSpan.FromSeconds(15);
+    public static readonly TimeSpan PushTimeout = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// Upper bound on one hub invocation.
+    /// </summary>
+    /// <remarks>
+    /// <c>HubConnection.InvokeAsync</c> has no timeout of its own, so without this a stalled call consumed
+    /// the whole per-test budget and surfaced as an unattributed "test exceeded 60 seconds" — which says
+    /// nothing about which call hung. Bounding each invocation turns that into a named failure.
+    /// </remarks>
+    public static readonly TimeSpan InvokeTimeout = TimeSpan.FromSeconds(30);
 
     private readonly HubConnection connection;
     private readonly Lock gate = new();
@@ -65,13 +75,22 @@ public sealed class TestHubClient : IAsyncDisposable
     /// <summary>Joins a room and returns the history the chat window opens with, oldest first.</summary>
     /// <param name="chatRoomId">Room to join.</param>
     public Task<IReadOnlyList<MessageDto>> JoinRoomAsync(Guid chatRoomId) =>
-        connection.InvokeAsync<IReadOnlyList<MessageDto>>(nameof(ChatHub.JoinRoom), chatRoomId);
+        InvokeAsync(
+            token => connection.InvokeAsync<IReadOnlyList<MessageDto>>(nameof(ChatHub.JoinRoom), chatRoomId, token),
+            nameof(ChatHub.JoinRoom));
 
     /// <summary>Sends one line of chat input, exactly as the page's send box does.</summary>
     /// <param name="chatRoomId">Room to post into.</param>
     /// <param name="text">What the participant typed — a message or a <c>/stock=</c> command.</param>
-    public Task SendMessageAsync(Guid chatRoomId, string text) =>
-        connection.InvokeAsync(nameof(ChatHub.SendMessage), chatRoomId, text);
+    public async Task SendMessageAsync(Guid chatRoomId, string text) =>
+        await InvokeAsync<object?>(
+            async token =>
+            {
+                await connection.InvokeAsync(nameof(ChatHub.SendMessage), chatRoomId, text, token)
+                    .ConfigureAwait(false);
+                return null;
+            },
+            nameof(ChatHub.SendMessage)).ConfigureAwait(false);
 
     /// <summary>
     /// The next post pushed to this connection, waiting for it if it has not arrived yet.
@@ -102,6 +121,26 @@ public sealed class TestHubClient : IAsyncDisposable
 
     /// <inheritdoc/>
     public async ValueTask DisposeAsync() => await connection.DisposeAsync().ConfigureAwait(false);
+
+    /// <summary>
+    /// Runs one hub invocation under <see cref="InvokeTimeout"/> and reports a stall by name.
+    /// </summary>
+    private static async Task<T> InvokeAsync<T>(Func<CancellationToken, Task<T>> invoke, string hubMethod)
+    {
+        using CancellationTokenSource timeout = new(InvokeTimeout);
+
+        try
+        {
+            return await invoke(timeout.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException exception) when (timeout.IsCancellationRequested)
+        {
+            throw new TimeoutException(
+                $"{hubMethod} did not answer within {InvokeTimeout.TotalSeconds:0} seconds. The server "
+                + "accepted the connection but never completed the invocation.",
+                exception);
+        }
+    }
 
     private void Push(MessageDto message)
     {
