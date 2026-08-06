@@ -32,6 +32,59 @@ public sealed class AddStockQuotesTests
         provider.GetRequiredService<IStockQuoteProvider>().Should().BeOfType<StooqClient>();
     }
 
+    /// <summary>
+    /// The provider is chosen by one configuration value, which is what
+    /// <c>dotnet user-secrets set "Stocks:Provider" "Finnhub"</c> sets. Nothing else in the application
+    /// changes, so this is the whole switch — and it is asserted for both spellings a deployment might use.
+    /// </summary>
+    [Theory]
+    [InlineData("Finnhub")]
+    [InlineData("finnhub")]
+    [InlineData("FINNHUB")]
+    public async Task AddStockQuotes_WhenTheProviderIsFinnhub_ResolvesTheFinnhubClient(string provider)
+    {
+        await using ServiceProvider services = ForProvider(provider);
+
+        services.GetRequiredService<IStockQuoteProvider>().Should().BeOfType<FinnhubClient>();
+    }
+
+    /// <summary>Stooq stays the default, so a deployment that sets nothing keeps the documented endpoint.</summary>
+    [Theory]
+    [InlineData(null)]
+    [InlineData("Stooq")]
+    [InlineData("stooq")]
+    public async Task AddStockQuotes_WhenTheProviderIsAbsentOrStooq_ResolvesTheStooqClient(string? provider)
+    {
+        await using ServiceProvider services = ForProvider(provider);
+
+        services.GetRequiredService<IStockQuoteProvider>().Should().BeOfType<StooqClient>();
+    }
+
+    /// <summary>
+    /// A typo must not look like the alternative quietly not being used, so it fails at startup with the
+    /// value and the accepted names in the message.
+    /// </summary>
+    [Fact]
+    public void AddStockQuotes_WhenTheProviderIsUnknown_FailsFast()
+    {
+        ServiceCollection services = [];
+
+        services.Invoking(collection => collection.AddStockQuotes(ForProviderConfiguration("Yahoo")))
+            .Should().Throw<InvalidOperationException>()
+            .WithMessage("*Yahoo*")
+            .WithMessage("*Stooq*")
+            .WithMessage("*Finnhub*");
+    }
+
+    /// <summary>The Finnhub key is bound from configuration, never hard-coded.</summary>
+    [Fact]
+    public async Task AddStockQuotes_WhenTheProviderIsFinnhub_BindsTheApiKeyFromConfiguration()
+    {
+        await using ServiceProvider services = ForProvider(DependencyInjection.FinnhubProvider);
+
+        services.GetRequiredService<IOptions<FinnhubOptions>>().Value.ApiKey.Should().Be("key-from-config");
+    }
+
     [Fact]
     public async Task AddStockQuotes_BindsTheStooqSettingsFromConfiguration()
     {
@@ -152,6 +205,33 @@ public sealed class AddStockQuotesTests
 
         services.Invoking(collection => collection.AddStockQuotes(null!))
             .Should().Throw<ArgumentNullException>();
+    }
+
+    /// <summary>
+    /// Registers the quote provider for one <c>Stocks:Provider</c> value, built from an explicit
+    /// configuration so a developer's own user-secrets can never change what these tests assert.
+    /// </summary>
+    private static ServiceProvider ForProvider(string? provider)
+    {
+        ServiceCollection services = [];
+        services.AddStockQuotes(ForProviderConfiguration(provider));
+
+        return services.BuildServiceProvider(validateScopes: true);
+    }
+
+    private static IConfiguration ForProviderConfiguration(string? provider)
+    {
+        Dictionary<string, string?> settings = new()
+        {
+            [$"{FinnhubOptions.SectionName}:{nameof(FinnhubOptions.ApiKey)}"] = "key-from-config",
+        };
+
+        if (provider is not null)
+        {
+            settings[DependencyInjection.StockQuoteProviderKey] = provider;
+        }
+
+        return new ConfigurationBuilder().AddInMemoryCollection(settings).Build();
     }
 
     private static ServiceProvider Configured(Func<HttpRequestMessage, HttpResponseMessage>? respond = null)
