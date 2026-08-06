@@ -68,18 +68,18 @@ public sealed class StooqClientTests
     }
 
     /// <summary>
-    /// The download path's real answer for a symbol it will not serve: the words "Access denied" with
-    /// HTTP <b>200</b>. Reported as a symbol that was not found, so a mistyped ticker does not tell the
-    /// participant the whole service is down.
+    /// The download path's answer to any client outside a verified browser session: "Access denied" with
+    /// HTTP <b>200</b>, for a valid ticker as well as a misspelled one. A refusal, not a verdict on the
+    /// symbol.
     /// </summary>
     [Fact]
-    public async Task GetQuoteAsync_AccessDeniedWithASuccessStatus_ReturnsSymbolNotFound()
+    public async Task GetQuoteAsync_AccessDeniedWithASuccessStatus_ReturnsLookupFailed()
     {
         StooqClient client = Create(new StubHandler(Responds(HttpStatusCode.OK, "Access denied")));
 
         StockQuoteLookup lookup = await client.GetQuoteAsync(Code("aavvf.uss"), CancellationToken.None);
 
-        lookup.Outcome.Should().Be(StockQuoteOutcome.SymbolNotFound);
+        lookup.Outcome.Should().Be(StockQuoteOutcome.LookupFailed);
         lookup.Price.Should().BeNull();
     }
 

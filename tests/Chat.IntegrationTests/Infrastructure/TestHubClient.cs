@@ -67,7 +67,23 @@ public sealed class TestHubClient : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(connection);
 
         TestHubClient client = new(connection);
-        await connection.StartAsync().ConfigureAwait(false);
+
+        // Bounded like every other wait here. This was the last unbounded await in the hub path, and an
+        // unbounded one is how a stalled negotiate turned into "the test exceeded its time limit" with no
+        // indication of where it stopped.
+        using CancellationTokenSource timeout = new(InvokeTimeout);
+
+        try
+        {
+            await connection.StartAsync(timeout.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException exception) when (timeout.IsCancellationRequested)
+        {
+            throw new TimeoutException(
+                $"The hub connection did not start within {InvokeTimeout.TotalSeconds:0} seconds. "
+                + "The negotiate or the long-polling connect stalled.",
+                exception);
+        }
 
         return client;
     }

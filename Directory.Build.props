@@ -22,6 +22,10 @@
   <!-- Test projects are never packed and may keep xUnit's analyzer noise at warning level. -->
   <PropertyGroup Condition="$(MSBuildProjectName.EndsWith('Tests'))">
     <IsPackable>false</IsPackable>
+    <!-- One test host at a time. `dotnet test` at the root otherwise runs the unit and integration
+         assemblies concurrently, and the integration suite's SignalR-over-TestServer waits have stalled
+         under that contention while passing on their own. See tests.runsettings. -->
+    <RunSettingsFilePath>$(MSBuildThisFileDirectory)tests.runsettings</RunSettingsFilePath>
   </PropertyGroup>
 
 </Project>

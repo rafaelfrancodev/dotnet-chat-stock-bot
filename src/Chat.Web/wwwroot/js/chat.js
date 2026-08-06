@@ -24,9 +24,13 @@
     const alertBox = document.getElementById("chat-alert");
     const alertText = document.getElementById("chat-alert-text");
     const alertDismiss = document.getElementById("chat-alert-dismiss");
+    const help = document.getElementById("chat-help");
+    const helpDismiss = document.getElementById("chat-help-dismiss");
 
     // Error = 2 in ChatAlertSeverity. Anything else is a warning and is rendered amber.
     const SEVERITY_ERROR = 2;
+
+    const HELP_DISMISSED = "chat.help.dismissed";
 
     // JoinRoom subscribes before it reads the history, so a post committed in between legitimately
     // arrives twice. Ids are what settle it: a duplicate is dropped, and nothing is ever lost.
@@ -60,6 +64,53 @@
     }
 
     alertDismiss.addEventListener("click", hideAlert);
+
+    // Shown until dismissed once. localStorage rather than a cookie: it is a display preference, nothing
+    // the server needs, and reading it must never stop the chat from loading.
+    function setUpHelp() {
+        let dismissed = false;
+
+        try {
+            dismissed = window.localStorage.getItem(HELP_DISMISSED) === "true";
+        } catch (error) {
+            console.warn("Help preference unavailable; showing the help panel.", error);
+        }
+
+        help.classList.toggle("d-none", dismissed);
+
+        helpDismiss.addEventListener("click", () => {
+            help.classList.add("d-none");
+
+            try {
+                window.localStorage.setItem(HELP_DISMISSED, "true");
+            } catch (error) {
+                console.warn("Help preference could not be saved.", error);
+            }
+        });
+    }
+
+    /**
+     * Appends a line that exists only in this window: the command the participant typed, or an error the
+     * server sent them alone. Neither is a post — nothing here is stored, broadcast, or part of the
+     * last-50 history, and all of it disappears on reload. That is what keeps a `/stock=` command out of
+     * the database while still letting the person who typed it see that something happened.
+     */
+    function renderLocal(label, text, className) {
+        const marker = document.createElement("em");
+        marker.className = "text-muted me-2";
+        marker.textContent = label;
+
+        const content = document.createElement("span");
+        content.className = className;
+        content.textContent = text;
+
+        const item = document.createElement("li");
+        item.className = "small";
+        item.append(marker, content);
+
+        messages.appendChild(item);
+        messages.scrollTop = messages.scrollHeight;
+    }
 
     function render(message) {
         if (!message || rendered.has(message.id)) {
@@ -97,7 +148,9 @@
     connection.on("ReceiveMessage", render);
 
     // Errors are sent to the caller alone and carry curated text only, so they are safe to show as-is.
-    connection.on("ReceiveError", setStatus);
+    // They go into the message list, not just the status line: an unknown command or a rejected ticker
+    // used to leave the list unchanged, which reads as "nothing happened" rather than "that was refused".
+    connection.on("ReceiveError", (message) => renderLocal("not sent —", message, "text-danger"));
 
     // Sent to this participant's connections only — for example when Stooq is unreachable.
     connection.on("ReceiveAlert", showAlert);
@@ -126,18 +179,24 @@
 
         input.value = "";
 
+        // A command is echoed locally; an ordinary message is not. The difference is that an ordinary
+        // message comes back through the room broadcast — which includes this connection — so echoing it
+        // would show it twice, while a command is never broadcast and never stored, so without this the
+        // participant sees no evidence they typed anything at all.
+        if (text.startsWith("/")) {
+            renderLocal("you typed —", text, "text-muted");
+        }
+
         try {
-            // Nothing is rendered here on purpose: an ordinary post comes back through the room
-            // broadcast, which includes this connection, and a /stock= command is answered later by the
-            // bot. Echoing either would show it twice.
             await connection.invoke("SendMessage", roomId, text);
         } catch (error) {
-            setStatus("The message could not be sent.");
+            renderLocal("not sent —", "The message could not be sent. Check the connection status below.", "text-danger");
             console.error(error);
         }
     });
 
     (async function start() {
+        setUpHelp();
         setStatus("Connecting…");
 
         try {

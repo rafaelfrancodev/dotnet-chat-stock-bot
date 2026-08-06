@@ -38,12 +38,6 @@ internal static class StooqCsvParser
     /// <summary>What Stooq writes in the data fields of a ticker it does not know.</summary>
     internal const string NotAvailable = "N/D";
 
-    /// <summary>
-    /// The body Stooq returns for a symbol it does not have on the download path — with HTTP <b>200</b>,
-    /// which is why the status code cannot be used to tell a bad ticker from a broken service.
-    /// </summary>
-    internal const string SymbolRefused = "Access denied";
-
     private const char FieldSeparator = ',';
     private const int HeaderAndDataLines = 2;
 
@@ -79,9 +73,14 @@ internal static class StooqCsvParser
             LineSeparators,
             StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
+        // Anything that is not a readable CSV is the service refusing to serve us, not a verdict on the
+        // ticker. Measured 2026-08-06: from any client outside a verified browser session, Stooq answers
+        // "Access denied" (200, text/plain) for a *valid* ticker and for a misspelled one alike, so that
+        // body carries no information about the symbol. Reporting "symbol not found" for it would tell a
+        // participant their correct ticker does not exist. Only N/D inside a real CSV row means that.
         if (lines.Length < HeaderAndDataLines || Array.FindIndex(lines[0].Split(FieldSeparator), IsPriceColumn) < 0)
         {
-            return ClassifyNonCsvBody(body);
+            return StockQuoteLookup.LookupFailed;
         }
 
         string[] header = lines[0].Split(FieldSeparator);
@@ -117,26 +116,6 @@ internal static class StooqCsvParser
             ? StockQuoteLookup.Quoted(closingPrice)
             : StockQuoteLookup.LookupFailed;
     }
-
-    /// <summary>
-    /// Decides what a body that is not a readable CSV actually means.
-    /// </summary>
-    /// <remarks>
-    /// Stooq answers <b>200</b> for a symbol it will not serve, with the plain text
-    /// <see cref="SymbolRefused"/> rather than a CSV — so the ticker is the problem, and the participant
-    /// should be told the symbol was not found instead of that the service is down. Anything else
-    /// unreadable is the service's problem: a truncated body, a header with no sessions, or something that
-    /// is not CSV at all.
-    /// <para>
-    /// The wording is Stooq's, and it is ambiguous: a throttled or blocked client would plausibly see the
-    /// same text. Reporting "symbol not found" is the reading that matches the observed behaviour for a
-    /// misspelled ticker, which is the case a participant actually hits.
-    /// </para>
-    /// </remarks>
-    private static StockQuoteLookup ClassifyNonCsvBody(string body) =>
-        body.Contains(SymbolRefused, StringComparison.OrdinalIgnoreCase)
-            ? StockQuoteLookup.SymbolNotFound
-            : StockQuoteLookup.LookupFailed;
 
     private static bool IsPriceColumn(string column) =>
         column.Trim().Equals(PriceColumn, StringComparison.OrdinalIgnoreCase);

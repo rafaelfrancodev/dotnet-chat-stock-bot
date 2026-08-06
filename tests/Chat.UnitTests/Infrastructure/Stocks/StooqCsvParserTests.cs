@@ -81,18 +81,21 @@ public sealed class StooqCsvParserTests
     }
 
     /// <summary>
-    /// Stooq answers a symbol it will not serve with <c>Access denied</c> and HTTP <b>200</b>, so the
-    /// status code cannot tell a bad ticker from a broken service — the body has to. A participant who
-    /// mistyped a ticker must be told the symbol was not found, not that the service is down.
+    /// Measured 2026-08-06: from any client outside a verified browser session, Stooq answers
+    /// <c>Access denied</c> (200, <c>text/plain</c>) for a <b>valid</b> ticker and for a misspelled one
+    /// alike. The body therefore says nothing about the symbol, and reporting "symbol not found" for it
+    /// would tell a participant that their correct ticker does not exist. It is the service refusing us.
     /// </summary>
     [Theory]
     [InlineData("Access denied")]
     [InlineData("Access denied\n")]
     [InlineData("access denied")]
     [InlineData("  Access denied  ")]
-    public void Parse_AccessDeniedBody_ReturnsSymbolNotFound(string body)
+    public void Parse_AccessDeniedBody_ReturnsLookupFailed(string body)
     {
-        StooqCsvParser.Parse(body).Outcome.Should().Be(StockQuoteOutcome.SymbolNotFound);
+        StooqCsvParser.Parse(body).Outcome.Should().Be(
+            StockQuoteOutcome.LookupFailed,
+            "the same body comes back for a valid ticker, so it cannot mean the symbol is unknown");
     }
 
     /// <summary>

@@ -17,7 +17,7 @@ itself is never written to the database — only the bot's answer is.
 | Post owner is the bot | `Message.PostByBot` — takes no author, uses `MessageAuthor.Bot` |
 | Ordered by timestamp, last 50 only | `MessageRepository.GetLatestAsync`, capped in `GetLatestMessagesValidator` |
 | The stock command is never persisted | Enforced structurally in four layers — see [Design decisions](#design-decisions) |
-| Unit tests | 514 tests in `tests/Chat.UnitTests`, plus 11 in `tests/Chat.IntegrationTests` |
+| Unit tests | 514 tests in `tests/Chat.UnitTests`, plus 19 in `tests/Chat.IntegrationTests` |
 
 ---
 
@@ -147,8 +147,14 @@ This is the script the challenge says a reviewer will follow, and it works as wr
    nav bar.)
 3. Type a line in one window. It appears in **both**, once, immediately, oldest-first, with the sender's
    display name. Only the last 50 messages of the room are ever loaded.
+A dismissible **help panel** at the top of the chat page explains all of this in the UI itself.
+
 4. In one window, type `/stock=aapl.us`.
-   - The command line itself never appears in the chat and is never stored.
+   - The command is **never stored and never broadcast**. The window that typed it shows a grey
+     `you typed — /stock=aapl.us` line so the sender can see something happened; that line is
+     client-side only and disappears on reload, which is what keeps the command out of the database.
+   - An unknown command (`/help`) or a rejected ticker (`/stock=a&b`) shows a red `not sent — …` line to
+     the sender alone. Neither reaches the room.
    - A message from **`Bot`** appears in **both** windows.
    - With Stooq's CSV endpoint reachable, that message reads `AAPL.US quote is $93.42 per share`.
      As measured today it is not reachable, so the bot answers
@@ -194,7 +200,7 @@ job — consuming requests and answering politely — still works.
 dotnet test
 ```
 
-**525 tests, all passing** — 514 unit tests and 11 integration tests.
+**533 tests, all passing** — 514 unit tests and 19 integration tests.
 
 `tests/Chat.UnitTests` (514) is **hermetic**: no containers, no broker, no network access, about three
 seconds. Database behaviour is covered by translating EF Core queries offline (`ToQueryString()`) and by
@@ -202,7 +208,7 @@ SQLite in process memory where a real unique index is needed; messaging is cover
 in-memory `ITestHarness`; Stooq is covered by a stubbed `HttpMessageHandler` pointed at a
 deliberately-unroutable host so a bypassed stub fails loudly instead of calling the real service.
 
-`tests/Chat.IntegrationTests` (11) hosts the real `Chat.Web` with `WebApplicationFactory` against a
+`tests/Chat.IntegrationTests` (19) hosts the real `Chat.Web` with `WebApplicationFactory` against a
 **throwaway SQL Server container** (`Testcontainers.MsSql`, the same image `docker-compose.dev.yml` uses),
 so it **needs Docker** — about 25 seconds including the container. RabbitMQ is *not* needed: the bus is
 replaced by MassTransit's in-memory test harness, which keeps the real publisher adapters, the real
@@ -368,17 +374,22 @@ banner:
 | What arrived | Reported as | What the participant sees |
 | --- | --- | --- |
 | CSV with a `Close` column | `Quoted` | `AAPL.US quote is $93.42 per share` |
-| `200` + body `Access denied` | `SymbolNotFound` | `Sorry, I could not find a quote for AAPL.XX.` — no banner |
+| `200` + body `Access denied` | `LookupFailed` | outage line + banner (see below) |
 | CSV whose newest row is truncated | `LookupFailed` | the outage line + banner (never an older session's close) |
 | `200` + an HTML page (verification or error) | `LookupFailed` | the outage line + banner |
 | `4xx` / `5xx`, transport error, timeout, open circuit | `LookupFailed` | the outage line + banner |
 
 The distinction matters: a mistyped ticker must not tell a participant that the whole service is down, and
-a service outage must not look like a ticker that does not exist. One caveat recorded honestly —
-`Access denied` is Stooq's wording and is ambiguous; a throttled client would plausibly see it too. It is
-read as "symbol not found" because that is the observed answer for a misspelled ticker, which is the case a
-participant actually hits. When it is not a quote, the bot logs the media type and the body's first line, so
-which case occurred is visible in the log.
+a service outage must not look like a ticker that does not exist. The genuine unknown-symbol signal is
+therefore **`N/D` inside a real CSV row** and nothing else.
+
+`Access denied` was initially read as "symbol not found", because that is what it means inside a verified
+browser session. Measuring it settled the question the other way: from any client outside such a session
+Stooq returns that same body for a **valid** ticker as well as a misspelled one, so it carries no
+information about the symbol. Treating it as "not found" would have answered *"Sorry, I could not find a
+quote for AAPL.US"* for every correct ticker — a confident, wrong answer. It is a refusal, so it is reported
+as one. When the answer is not a quote, the bot logs the media type and the body's first line, so which case
+occurred is visible in the log rather than inferred.
 
 Consequence for a reviewer: `/stock=aapl.us` exercises the graceful-failure path rather than the quote
 path. The room gets `I could not reach the quote service, so I have no price for AAPL.US right now.`
@@ -439,6 +450,28 @@ purpose: `ChatRoom` is a real aggregate with a unique room name, `Messages` are 
 the UI to drive them; today the chat page always opens the seeded `General` room.
 
 **Installer — not done** (bonus 2.5).
+
+---
+
+## Known issues
+
+**The integration suite can stall intermittently when `dotnet test` is run at the repository root.**
+Roughly one run in four, three of the SignalR-based tests hang until their per-test backstop and the run
+reports three failures; the same tests pass in 16–24 seconds when the project is run on its own, and the
+cause has not been pinned down. If you hit it:
+
+```bash
+dotnet test tests/Chat.UnitTests           # 514, hermetic, ~3 s
+dotnet test tests/Chat.IntegrationTests    # 19, needs Docker, ~25 s
+```
+
+Every wait inside those tests is individually bounded and names what stalled — the hub connect, the
+invocation, or the push — so a recurrence reports where it stopped rather than only that the test ran out
+of time. `tests.runsettings` also serialises the two test hosts, which reduces contention but did not
+eliminate it. Two things worth knowing while diagnosing: an interrupted run can leave a `testhost` process
+holding the test DLLs, which then makes the *build* fail with `MSB3027 … locked by testhost` — kill stray
+`testhost` processes if that happens; and a `dotnet run` left over from a previous session will hold
+port 5271 or 5299.
 
 ---
 

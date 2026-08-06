@@ -22,6 +22,35 @@ else
     <p>Signed in as <strong>@Model.DisplayName</strong> in <strong>@Model.Room.Name</strong>.</p>
 
     <div id="chat" data-room-id="@Model.Room.Id" data-hub-url="@ChatHub.Route">
+        @* Static markup, no user input anywhere in it. Dismissal is remembered in localStorage. *@
+        <div id="chat-help" class="alert alert-info d-none" role="note">
+            <button id="chat-help-dismiss" type="button" class="btn-close float-end" aria-label="Hide help"></button>
+            <strong>How to use this chat</strong>
+            <ul class="small mb-0 mt-2">
+                <li>
+                    Type anything and press <strong>Send</strong> to post to the room. Ordinary messages are
+                    saved, so they are still here after a reload — the newest 50 are shown.
+                </li>
+                <li>
+                    Ask the bot for a share price with <code>/stock=&lt;code&gt;</code>, for example
+                    <code>/stock=aapl.us</code>. The answer arrives a moment later as a post from
+                    <strong>Bot</strong>, because a separate process fetches it.
+                </li>
+                <li>
+                    Codes are lower case with a market suffix — <code>aapl.us</code>, <code>msft.us</code>,
+                    <code>usdbrl</code> — and may contain only letters, digits, dots and hyphens.
+                </li>
+                <li>
+                    <code>/stock=</code> is the only command. Anything else beginning with <code>/</code> is
+                    answered privately to you and is not shown to the room.
+                </li>
+                <li>
+                    <strong>Commands are never saved to the chat history</strong> — that is deliberate. Your
+                    own window shows what you typed in grey so you can see it, until you reload.
+                </li>
+            </ul>
+        </div>
+
         @* Hidden until the server sends an alert. The text is set by the client with textContent. *@
         <div id="chat-alert" class="alert alert-danger d-none" role="alert" aria-live="assertive">
             <span id="chat-alert-text"></span>

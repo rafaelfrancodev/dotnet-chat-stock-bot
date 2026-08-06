@@ -60,19 +60,38 @@ public sealed class StockQuoteResolutionTests
     }
 
     /// <summary>
-    /// The case a participant actually hits by mistyping a ticker. It must not claim the service is down —
-    /// that would be the outage banner, and there is no outage.
+    /// Stooq refuses any client outside a verified browser session with "Access denied" and HTTP 200 —
+    /// measured for a valid ticker as well as a misspelled one, so it cannot be read as an unknown symbol.
     /// </summary>
     [Fact]
-    public async Task StockQuoteRequested_WhenStooqRefusesTheSymbol_PublishesSymbolNotFound()
+    public async Task StockQuoteRequested_WhenStooqRefusesTheRequest_PublishesLookupFailed()
     {
         await using Harness harness = await Harness.StartAsync(HttpStatusCode.OK, AccessDenied);
 
-        StockQuoteResolved answer = await harness.ResolveAsync("aavvf.uss");
+        StockQuoteResolved answer = await harness.ResolveAsync("aavvf.us");
+
+        answer.Outcome.Should().Be(StockQuoteOutcome.LookupFailed);
+        answer.Price.Should().BeNull();
+        answer.Message.Should().Be(
+            "I could not reach the quote service, so I have no price for AAVVF.US right now.");
+    }
+
+    /// <summary>
+    /// The genuine unknown-symbol signal is <c>N/D</c> inside a real CSV row, which is what the
+    /// single-quote path returns. That one does mean the ticker does not exist.
+    /// </summary>
+    [Fact]
+    public async Task StockQuoteRequested_WhenTheCsvSaysNotAvailable_PublishesSymbolNotFound()
+    {
+        const string notAvailable =
+            "Symbol,Date,Time,Open,High,Low,Close,Volume\nZZZZ.US,N/D,N/D,N/D,N/D,N/D,N/D,N/D\n";
+
+        await using Harness harness = await Harness.StartAsync(HttpStatusCode.OK, notAvailable);
+
+        StockQuoteResolved answer = await harness.ResolveAsync("zzzz.us");
 
         answer.Outcome.Should().Be(StockQuoteOutcome.SymbolNotFound);
-        answer.Price.Should().BeNull();
-        answer.Message.Should().Be("Sorry, I could not find a quote for AAVVF.USS.");
+        answer.Message.Should().Be("Sorry, I could not find a quote for ZZZZ.US.");
     }
 
     /// <summary>

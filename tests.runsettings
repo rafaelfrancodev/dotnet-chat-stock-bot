@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Applied to every test project through Directory.Build.props.
+
+  MaxCpuCount=1 runs one test host at a time. `dotnet test` at the repository root otherwise starts the
+  unit and integration assemblies concurrently, and the integration suite hosts a real TestServer talking
+  SignalR long polling to a SQL Server container. Serialising reduces that contention and costs almost
+  nothing, because the unit suite finishes in about three seconds.
+
+  It did NOT eliminate the intermittent stall described in README -> Known issues: that was still observed
+  with this in place. It is kept because one test host at a time is the right default for a suite that
+  owns a container, not because it is a fix.
+-->
+<RunSettings>
+  <RunConfiguration>
+    <MaxCpuCount>1</MaxCpuCount>
+  </RunConfiguration>
+</RunSettings>
