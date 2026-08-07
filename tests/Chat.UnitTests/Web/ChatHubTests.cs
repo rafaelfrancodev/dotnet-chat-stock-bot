@@ -1,9 +1,11 @@
 using System.Reflection;
 using System.Security.Claims;
 using Chat.Application.Contracts.Messages;
+using Chat.Application.Contracts.Rooms;
 using Chat.Application.Errors;
 using Chat.Application.Features.Messages.GetLatestMessages;
 using Chat.Application.Features.Messages.PostMessage;
+using Chat.Application.Features.Rooms.CreateRoom;
 using Chat.Domain.ChatRooms;
 using Chat.Domain.Common;
 using Chat.Domain.Messages;
@@ -44,6 +46,10 @@ public sealed class ChatHubTests : IDisposable
         _context.ConnectionId.Returns(ConnectionId);
         _context.ConnectionAborted.Returns(_ => _connectionAborted.Token);
         _context.User.Returns(Principal(UserId, DisplayName));
+
+        // SignalR supplies this per connection and frees it with the connection; the hub keeps the room it
+        // joined here so a switch can leave the previous group.
+        _context.Items.Returns(new Dictionary<object, object?>());
 
         // Mirrors SignalR's DefaultUserIdProvider: the id is the subject claim of the validated ticket,
         // so a test that reads it is genuinely reading the claims and not a value set beside them.
@@ -302,6 +308,153 @@ public sealed class ChatHubTests : IDisposable
     }
 
     // ---------------------------------------------------------------------------------------------
+    // Switching rooms
+    // ---------------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// The correctness rule of the multiple-rooms bonus. Without this a participant who switches keeps
+    /// receiving the previous room's posts, so two rooms would bleed into one window.
+    /// </summary>
+    [Fact]
+    public async Task JoinRoom_AfterJoiningAnother_LeavesThePreviousRoomsGroup()
+    {
+        Guid otherRoomId = Guid.CreateVersion7();
+        ChatHub hub = CreateHub();
+
+        await hub.JoinRoom(RoomId);
+        await hub.JoinRoom(otherRoomId);
+
+        await _groups.Received(1).RemoveFromGroupAsync(
+            ConnectionId, ChatHub.GroupFor(ChatRoom), _connectionAborted.Token);
+        await _groups.Received(1).AddToGroupAsync(
+            ConnectionId, ChatHub.GroupFor(new ChatRoomId(otherRoomId)), _connectionAborted.Token);
+    }
+
+    /// <summary>
+    /// Leaving must come first. Adding first would leave a window in which the connection is in both
+    /// groups, and a post from the old room would render into the new room's list.
+    /// </summary>
+    [Fact]
+    public async Task JoinRoom_AfterJoiningAnother_LeavesBeforeItJoins()
+    {
+        Guid otherRoomId = Guid.CreateVersion7();
+        ChatHub hub = CreateHub();
+
+        await hub.JoinRoom(RoomId);
+        await hub.JoinRoom(otherRoomId);
+
+        Received.InOrder(() =>
+        {
+            _groups.RemoveFromGroupAsync(ConnectionId, ChatHub.GroupFor(ChatRoom), Arg.Any<CancellationToken>());
+            _groups.AddToGroupAsync(
+                ConnectionId, ChatHub.GroupFor(new ChatRoomId(otherRoomId)), Arg.Any<CancellationToken>());
+        });
+    }
+
+    /// <summary>
+    /// The reconnect path re-joins the room it is already in. Removing the group there would drop the
+    /// membership the reconnect exists to restore.
+    /// </summary>
+    [Fact]
+    public async Task JoinRoom_TheSameRoomTwice_DoesNotLeaveTheGroup()
+    {
+        ChatHub hub = CreateHub();
+
+        await hub.JoinRoom(RoomId);
+        await hub.JoinRoom(RoomId);
+
+        await _groups.DidNotReceive().RemoveFromGroupAsync(
+            Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task JoinRoom_FirstRoomOfTheConnection_LeavesNothing()
+    {
+        await CreateHub().JoinRoom(RoomId);
+
+        await _groups.DidNotReceive().RemoveFromGroupAsync(
+            Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>());
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // CreateRoom
+    // ---------------------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task CreateRoom_ValidName_ReturnsTheRoomAndReportsNothing()
+    {
+        ChatRoomDto created = new(Guid.CreateVersion7(), "Trading");
+        _sender.Send(Arg.Any<CreateRoomCommand>(), Arg.Any<CancellationToken>())
+            .Returns(Result.Success(created));
+
+        ChatRoomDto? returned = await CreateHub().CreateRoom("Trading");
+
+        returned.Should().Be(created);
+        await _caller.DidNotReceive().SendCoreAsync(
+            Arg.Any<string>(), Arg.Any<object?[]>(), Arg.Any<CancellationToken>());
+    }
+
+    /// <summary>
+    /// Creating is not joining. A participant may create a room and stay where they are, and the client
+    /// calls <c>JoinRoom</c> next — so this method must not move the connection between groups.
+    /// </summary>
+    [Fact]
+    public async Task CreateRoom_ValidName_DoesNotJoinTheCallerToIt()
+    {
+        _sender.Send(Arg.Any<CreateRoomCommand>(), Arg.Any<CancellationToken>())
+            .Returns(Result.Success(new ChatRoomDto(Guid.CreateVersion7(), "Trading")));
+
+        await CreateHub().CreateRoom("Trading");
+
+        await _groups.DidNotReceive().AddToGroupAsync(
+            Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task CreateRoom_RefusedName_ReturnsNullAndTellsTheCallerAlone()
+    {
+        _sender.Send(Arg.Any<CreateRoomCommand>(), Arg.Any<CancellationToken>())
+            .Returns(Result.Failure<ChatRoomDto>(CreateRoomCommand.Errors.NameTaken));
+
+        ChatRoomDto? returned = await CreateHub().CreateRoom("General");
+
+        returned.Should().BeNull();
+        await _caller.Received(1).SendCoreAsync(
+            ChatHub.ReceiveError,
+            Arg.Is<object?[]>(arguments =>
+                (string)arguments![0]! == CreateRoomCommand.Errors.NameTaken.Message),
+            Arg.Any<CancellationToken>());
+        _clients.DidNotReceive().Group(Arg.Any<string>());
+    }
+
+    /// <summary>
+    /// The name is passed through untouched: normalisation belongs to <c>RoomName</c>, and a hub that
+    /// trimmed first would be a second place where the rules live.
+    /// </summary>
+    [Fact]
+    public async Task CreateRoom_Always_PassesTheNameThroughUnchanged()
+    {
+        const string typed = "  Trading   Desk  ";
+        _sender.Send(Arg.Any<CreateRoomCommand>(), Arg.Any<CancellationToken>())
+            .Returns(Result.Success(new ChatRoomDto(Guid.CreateVersion7(), "Trading Desk")));
+
+        await CreateHub().CreateRoom(typed);
+
+        await _sender.Received(1).Send(
+            Arg.Is<CreateRoomCommand>(command => command!.Name == typed),
+            _connectionAborted.Token);
+    }
+
+    [Fact]
+    public void CreateRoom_Signature_AcceptsOnlyTheName()
+    {
+        // No creator on the wire: a room has no owner, and identity never comes from a payload anyway.
+        ParameterInfo[] parameters = typeof(ChatHub).GetMethod(nameof(ChatHub.CreateRoom))!.GetParameters();
+
+        parameters.Select(parameter => parameter.ParameterType).Should().Equal(typeof(string));
+    }
+
+    // ---------------------------------------------------------------------------------------------
     // Group naming and state
     // ---------------------------------------------------------------------------------------------
 
@@ -315,8 +468,9 @@ public sealed class ChatHubTests : IDisposable
     public void Hub_KeepsNoMutableState_SoADisconnectHasNothingToCleanUp()
     {
         // OnDisconnectedAsync is deliberately not overridden: SignalR removes a closed connection from
-        // every group it joined, and this hub stores nothing per connection. Server-side state kept only
-        // to be cleaned up later is exactly what the resource budget rules out.
+        // every group it joined, and the one piece of per-connection state — the room currently joined —
+        // lives in HubCallerContext.Items, which SignalR frees with the connection. A map this class owned
+        // would have to be cleaned up, and that is what the resource budget rules out.
         const BindingFlags declared = BindingFlags.Instance | BindingFlags.Static
             | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly;
 

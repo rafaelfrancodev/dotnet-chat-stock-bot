@@ -31,6 +31,7 @@ builder.Services.AddChatIdentity(requireSecureCookie: !builder.Environment.IsDev
 // The realtime adapter lives here because IHubContext belongs to the host that owns the hub.
 builder.Services.AddSignalR();
 builder.Services.AddScoped<IChatNotifier, SignalRChatNotifier>();
+builder.Services.AddScoped<IChatRoomNotifier, SignalRChatRoomNotifier>();
 
 // MassTransit contributes its own "masstransit-bus" check via AddMessaging; AddChatBroker is what
 // turns a broker outage into an unready host. See RabbitMqHealthCheck for the measurement.

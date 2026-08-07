@@ -16,8 +16,15 @@
         return;
     }
 
-    const roomId = chat.dataset.roomId;
+    // The room currently joined. Not a constant: switching rooms reassigns it, and every send and rejoin
+    // reads it, so the window can never post into the room it just left.
+    let roomId = chat.dataset.roomId;
+
     const messages = document.getElementById("chat-messages");
+    const roomSelect = document.getElementById("chat-room");
+    const roomName = document.getElementById("chat-room-name");
+    const newRoomForm = document.getElementById("chat-new-room");
+    const newRoomInput = document.getElementById("chat-new-room-name");
     const form = document.getElementById("chat-form");
     const input = document.getElementById("chat-input");
     const status = document.getElementById("chat-status");
@@ -145,6 +152,67 @@
         setStatus("Connected.");
     }
 
+    /**
+     * Switches to another room. The rendered ids are cleared with the list: they exist to drop a post that
+     * arrived twice within one room, and keeping them across a switch would silently discard a message
+     * whose id was already seen — and would grow without bound as a participant moves between rooms.
+     * The server leaves the previous SignalR group on its own, so no "leave" call is needed here.
+     */
+    async function switchRoom(nextRoomId) {
+        if (!nextRoomId || nextRoomId === roomId) {
+            return;
+        }
+
+        roomId = nextRoomId;
+        rendered.clear();
+        messages.replaceChildren();
+        hideAlert();
+        setStatus("Joining…");
+
+        // The name comes from the option the server rendered, so it is text the server vouched for.
+        const selected = roomSelect.selectedOptions[0];
+        if (selected) {
+            roomName.textContent = selected.textContent;
+        }
+
+        try {
+            await joinRoom();
+            input.focus();
+        } catch (error) {
+            setStatus("The room could not be joined. Reload the page to try again.");
+            console.error(error);
+        }
+    }
+
+    function findRoomOption(id) {
+        // A loop rather than a built selector: nothing that arrived over the wire is ever spliced into a
+        // query string, the same rule this file applies to markup.
+        return Array.prototype.find.call(roomSelect.options, (option) => option.value === id);
+    }
+
+    /**
+     * Adds a room to the picker if it is not already there. Appended, not re-sorted: the server orders the
+     * initial list by name, and a room created while the window is open goes to the end rather than making
+     * the selection jump under the cursor.
+     */
+    function addRoomOption(room) {
+        if (!room || !room.id) {
+            return null;
+        }
+
+        const existing = findRoomOption(room.id);
+        if (existing) {
+            return existing;
+        }
+
+        const option = document.createElement("option");
+        option.value = room.id;
+        option.textContent = room.name;
+        roomSelect.appendChild(option);
+
+        return option;
+    }
+
     connection.on("ReceiveMessage", render);
 
     // Errors are sent to the caller alone and carry curated text only, so they are safe to show as-is.
@@ -152,8 +220,42 @@
     // used to leave the list unchanged, which reads as "nothing happened" rather than "that was refused".
     connection.on("ReceiveError", (message) => renderLocal("not sent —", message, "text-danger"));
 
-    // Sent to this participant's connections only — for example when Stooq is unreachable.
+    // Sent to this participant's connections only — for example when the quote service is unreachable.
     connection.on("ReceiveAlert", showAlert);
+
+    // The room directory, broadcast to everyone: somebody created a room, so offer it here too. It only
+    // adds an option — it never switches a participant's window out from under them.
+    connection.on("ReceiveRoom", addRoomOption);
+
+    roomSelect.addEventListener("change", () => switchRoom(roomSelect.value));
+
+    newRoomForm.addEventListener("submit", async (event) => {
+        event.preventDefault();
+
+        const name = newRoomInput.value.trim();
+        if (name.length === 0) {
+            return;
+        }
+
+        try {
+            // Null means the server refused it — a duplicate name, say — and it has already sent the reason
+            // through ReceiveError, so there is nothing to add here. The typed name is left in the box so
+            // it can be corrected rather than retyped.
+            const room = await connection.invoke("CreateRoom", name);
+            if (!room) {
+                return;
+            }
+
+            newRoomInput.value = "";
+
+            const option = addRoomOption(room);
+            option.selected = true;
+            await switchRoom(room.id);
+        } catch (error) {
+            renderLocal("not sent —", "The room could not be created. Check the connection status below.", "text-danger");
+            console.error(error);
+        }
+    });
 
     connection.onreconnecting(() => setStatus("Reconnecting…"));
     connection.onclose(() => setStatus("Disconnected. Reload the page to reconnect."));

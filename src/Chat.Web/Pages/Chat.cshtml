@@ -1,4 +1,6 @@
 @page
+@using Chat.Application.Contracts.Rooms
+@using Chat.Domain.ChatRooms
 @using Chat.Domain.Messages
 @using Chat.Web.Hubs
 @model ChatModel
@@ -19,9 +21,35 @@
 }
 else
 {
-    <p>Signed in as <strong>@Model.DisplayName</strong> in <strong>@Model.Room.Name</strong>.</p>
+    <p>
+        Signed in as <strong>@Model.DisplayName</strong> in
+        <strong id="chat-room-name">@Model.Room.Name</strong>.
+    </p>
 
     <div id="chat" data-room-id="@Model.Room.Id" data-hub-url="@ChatHub.Route">
+        @* Room picker. Names are rendered by Razor, which HTML-encodes them; rooms added while the page is
+           open are appended by the client with textContent. *@
+        <div class="d-flex flex-wrap align-items-end gap-3 mb-3">
+            <div>
+                <label class="form-label mb-1" for="chat-room">Room</label>
+                <select id="chat-room" class="form-select" style="min-width: 14rem">
+                    @foreach (ChatRoomDto room in Model.Rooms)
+                    {
+                        <option value="@room.Id" selected="@(room.Id == Model.Room.Id)">@room.Name</option>
+                    }
+                </select>
+            </div>
+
+            <form id="chat-new-room" class="d-flex align-items-end gap-2">
+                <div>
+                    <label class="form-label mb-1" for="chat-new-room-name">New room</label>
+                    <input id="chat-new-room-name" class="form-control" type="text" autocomplete="off"
+                           maxlength="@RoomName.MaxLength" placeholder="e.g. Trading" />
+                </div>
+                <button class="btn btn-outline-secondary" type="submit">Create and join</button>
+            </form>
+        </div>
+
         @* Static markup, no user input anywhere in it. Dismissal is remembered in localStorage. *@
         <div id="chat-help" class="alert alert-info d-none" role="note">
             <button id="chat-help-dismiss" type="button" class="btn-close float-end" aria-label="Hide help"></button>
@@ -47,6 +75,10 @@ else
                 <li>
                     <strong>Commands are never saved to the chat history</strong> — that is deliberate. Your
                     own window shows what you typed in grey so you can see it, until you reload.
+                </li>
+                <li>
+                    Pick another <strong>Room</strong> to switch, or create one. Each room keeps its own
+                    history and its own bot answers — a message posted in one is never shown in another.
                 </li>
             </ul>
         </div>
