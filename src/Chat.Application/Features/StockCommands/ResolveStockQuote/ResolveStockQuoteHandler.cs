@@ -14,10 +14,13 @@ namespace Chat.Application.Features.StockCommands.ResolveStockQuote;
 /// The bot use case: one lookup, one sentence, one published answer.
 /// </summary>
 /// <remarks>
-/// <b>It always answers.</b> The participant is waiting on a chat line, so an unknown ticker and an
-/// unreachable provider are outcomes with wording of their own rather than failures — the room never gets
-/// silence. That is why <see cref="IStockQuoteProvider"/> is documented not to throw for a Stooq problem,
-/// and why the only <c>catch</c> here is a backstop for a provider that breaks that promise anyway.
+/// <b>It always answers every command it is given.</b> The participant is waiting on a chat line, so an
+/// unknown ticker and an unreachable provider are outcomes with wording of their own rather than failures —
+/// the room never gets silence. That is why <see cref="IStockQuoteProvider"/> is documented not to throw
+/// for a Stooq problem, and why the only <c>catch</c> here is a backstop for a provider that breaks that
+/// promise anyway. Which deliveries become a command at all is the consumer's decision, so the end-to-end
+/// guarantee — every request Chat.Web publishes is answered — is stated on <c>Chat.Bot</c>'s
+/// <c>StockQuoteRequestConsumer</c>, where both halves are visible.
 /// <para>
 /// <b>It is marked <see cref="IBotFeature"/></b>, so only <c>Chat.Bot</c> registers it, and its
 /// constructor takes no persistence port at all: the bot never calls <c>AddPersistence()</c>, and a
@@ -111,9 +114,9 @@ internal sealed class ResolveStockQuoteHandler(
     /// </summary>
     /// <remarks>
     /// <see cref="StockQuoteLookup.Quoted(decimal)"/> cannot produce a priceless quote, but the record's
-    /// primary constructor can, and 1.16 reads the outcome to decide whether to raise an outage alert.
+    /// primary constructor can, and Chat.Web reads the outcome to decide whether to raise an outage alert.
     /// A "quoted" answer with no number is downgraded rather than rendered as <c>"$0.00 per share"</c> —
-    /// noise dressed up as data, which is the same call task 1.14's parser made about a zero close.
+    /// noise dressed up as data, which is the same call the CSV parser makes about a zero close.
     /// </remarks>
     private StockQuoteLookup Verified(StockCode stockCode, StockQuoteLookup lookup)
     {

@@ -73,6 +73,11 @@ public sealed class StockQuoteRequestConsumerTests
     /// Only Chat.Web publishes here and it can only hold a validated code, so an unusable ticker means a
     /// hand-crafted message with no participant waiting on it. Retrying would reproduce the same rejection
     /// four times and then dead-letter something already understood, so it is logged and acknowledged.
+    /// <para>
+    /// Dispatching nothing also means <b>answering nothing</b>, which is deliberate rather than the one hole
+    /// in "the room always gets an answer": posting a quote failure into a room that never asked would be
+    /// noise a forged message could aim anywhere.
+    /// </para>
     /// </summary>
     [Theory]
     [InlineData("")]
@@ -102,6 +107,11 @@ public sealed class StockQuoteRequestConsumerTests
     /// A failed <see cref="Result"/> is an expected, deterministic failure: an identical redelivery would
     /// reproduce it. It is logged and acknowledged rather than turned into an exception, which is what the
     /// Result pattern exists to avoid.
+    /// <para>
+    /// Only a pipeline behaviour can produce this, since the handler always succeeds — and no validator is
+    /// registered for <c>ResolveStockQuoteCommand</c>, so nothing reaches it today. Registering one would
+    /// turn this into a legitimate request left unanswered, which is why the consumer logs it at Error.
+    /// </para>
     /// </summary>
     [Fact]
     public async Task Consume_DispatchFails_AcknowledgesInsteadOfFaultingTheDelivery()
