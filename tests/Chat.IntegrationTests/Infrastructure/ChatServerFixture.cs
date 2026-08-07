@@ -1,10 +1,14 @@
 using System.Net;
+using Chat.Application.Contracts.Rooms;
+using Chat.Application.Features.Rooms.ListRooms;
 using Chat.Domain.ChatRooms;
+using Chat.Domain.Common;
 using Chat.Domain.Messages;
 using Chat.Infrastructure.Identity;
 using Chat.Infrastructure.Persistence;
 using Chat.Web.Hubs;
 using MassTransit.Testing;
+using MediatR;
 using Microsoft.AspNetCore.Http.Connections;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.SignalR.Client;
@@ -303,6 +307,27 @@ public sealed class ChatServerFixture : IAsyncLifetime
         await context.SaveChangesAsync().ConfigureAwait(false);
 
         return room.Id.Value;
+    }
+
+    /// <summary>
+    /// The room directory as the chat page reads it, through the real query and its repository.
+    /// </summary>
+    /// <remarks>
+    /// Dispatched rather than queried directly, so what a test sees is what the page sees — including the
+    /// ordering the repository does in SQL.
+    /// </remarks>
+    public async Task<IReadOnlyList<ChatRoomDto>> ListRoomsAsync()
+    {
+        await using AsyncServiceScope scope = Application.Services.CreateAsyncScope();
+        ISender sender = scope.ServiceProvider.GetRequiredService<ISender>();
+
+        Result<IReadOnlyList<ChatRoomDto>> rooms = await sender
+            .Send(new ListRoomsQuery())
+            .ConfigureAwait(false);
+
+        return rooms.IsSuccess
+            ? rooms.Value
+            : throw new InvalidOperationException($"Listing rooms failed: {rooms.Error}.");
     }
 
     /// <summary>

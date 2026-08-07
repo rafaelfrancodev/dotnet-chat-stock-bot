@@ -1,4 +1,5 @@
 using Chat.Application.Contracts.Messages;
+using Chat.Application.Contracts.Rooms;
 using Chat.Web.Hubs;
 using Microsoft.AspNetCore.SignalR.Client;
 
@@ -33,18 +34,25 @@ public sealed class TestHubClient : IAsyncDisposable
     /// </remarks>
     public static readonly TimeSpan InvokeTimeout = TimeSpan.FromSeconds(30);
 
+    /// <summary>
+    /// How long to wait when the expectation is that <b>nothing</b> arrives. Long enough that a broadcast
+    /// which should have been suppressed has time to show up and fail the test, short enough that several
+    /// such assertions do not dominate the suite.
+    /// </summary>
+    public static readonly TimeSpan SilenceWindow = TimeSpan.FromSeconds(2);
+
     private readonly HubConnection connection;
     private readonly Lock gate = new();
-    private readonly Queue<MessageDto> messages = new();
+    private readonly PushChannel<MessageDto> messages = new();
+    private readonly PushChannel<ChatRoomDto> rooms = new();
     private readonly List<string> errors = [];
-
-    private TaskCompletionSource<MessageDto>? pendingMessage;
 
     private TestHubClient(HubConnection connection)
     {
         this.connection = connection;
 
-        connection.On<MessageDto>(ChatHub.ReceiveMessage, Push);
+        connection.On<MessageDto>(ChatHub.ReceiveMessage, messages.Push);
+        connection.On<ChatRoomDto>(ChatHub.ReceiveRoom, rooms.Push);
         connection.On<string>(ChatHub.ReceiveError, Record);
     }
 
@@ -108,32 +116,37 @@ public sealed class TestHubClient : IAsyncDisposable
             },
             nameof(ChatHub.SendMessage)).ConfigureAwait(false);
 
+    /// <summary>Creates a room, exactly as the page's "create and join" box does.</summary>
+    /// <param name="name">The name to request. Untrusted and unnormalised, as it is from a browser.</param>
+    /// <returns>The created room, or <see langword="null"/> when the server refused the name.</returns>
+    public Task<ChatRoomDto?> CreateRoomAsync(string name) =>
+        InvokeAsync(
+            token => connection.InvokeAsync<ChatRoomDto?>(nameof(ChatHub.CreateRoom), name, token),
+            nameof(ChatHub.CreateRoom));
+
     /// <summary>
     /// The next post pushed to this connection, waiting for it if it has not arrived yet.
     /// </summary>
     /// <exception cref="TimeoutException">Nothing arrived within <see cref="PushTimeout"/>.</exception>
-    public async Task<MessageDto> NextMessageAsync()
-    {
-        TaskCompletionSource<MessageDto> waiter;
+    public async Task<MessageDto> NextMessageAsync() =>
+        await messages.TryNextAsync(PushTimeout).ConfigureAwait(false)
+        ?? throw new TimeoutException(
+            $"No message reached the client within {PushTimeout.TotalSeconds:0} seconds.");
 
-        lock (gate)
-        {
-            if (messages.TryDequeue(out MessageDto? alreadyHere))
-            {
-                return alreadyHere;
-            }
+    /// <summary>
+    /// The next post, or <see langword="null"/> if none arrives within <paramref name="within"/>. For
+    /// asserting that a broadcast was correctly <i>not</i> delivered — a room this connection did not join.
+    /// </summary>
+    /// <param name="within">How long to wait. Defaults to <see cref="SilenceWindow"/>.</param>
+    public Task<MessageDto?> TryNextMessageAsync(TimeSpan? within = null) =>
+        messages.TryNextAsync(within ?? SilenceWindow);
 
-            waiter = new TaskCompletionSource<MessageDto>(TaskCreationOptions.RunContinuationsAsynchronously);
-            pendingMessage = waiter;
-        }
-
-        using CancellationTokenSource timeout = new(PushTimeout);
-        using CancellationTokenRegistration registration = timeout.Token.Register(
-            () => waiter.TrySetException(new TimeoutException(
-                $"No message reached the client within {PushTimeout.TotalSeconds:0} seconds.")));
-
-        return await waiter.Task.ConfigureAwait(false);
-    }
+    /// <summary>The next room announcement, waiting for it if it has not arrived yet.</summary>
+    /// <exception cref="TimeoutException">Nothing arrived within <see cref="PushTimeout"/>.</exception>
+    public async Task<ChatRoomDto> NextRoomAsync() =>
+        await rooms.TryNextAsync(PushTimeout).ConfigureAwait(false)
+        ?? throw new TimeoutException(
+            $"No room announcement reached the client within {PushTimeout.TotalSeconds:0} seconds.");
 
     /// <inheritdoc/>
     public async ValueTask DisposeAsync() => await connection.DisposeAsync().ConfigureAwait(false);
@@ -158,29 +171,85 @@ public sealed class TestHubClient : IAsyncDisposable
         }
     }
 
-    private void Push(MessageDto message)
-    {
-        TaskCompletionSource<MessageDto>? waiter;
-
-        lock (gate)
-        {
-            waiter = pendingMessage;
-            pendingMessage = null;
-
-            if (waiter is null)
-            {
-                messages.Enqueue(message);
-            }
-        }
-
-        waiter?.TrySetResult(message);
-    }
-
     private void Record(string error)
     {
         lock (gate)
         {
             errors.Add(error);
+        }
+    }
+
+    /// <summary>
+    /// One stream of server pushes: a queue for what arrived before anybody asked, and at most one waiter
+    /// for what has not arrived yet.
+    /// </summary>
+    /// <remarks>
+    /// A timed-out waiter gives its slot back, so a push that arrives late is queued for the next caller
+    /// instead of being handed to a completed <see cref="TaskCompletionSource{TResult}"/> and lost. That
+    /// matters as soon as a test is allowed to time out on purpose, which
+    /// <see cref="TryNextMessageAsync"/> does.
+    /// </remarks>
+    private sealed class PushChannel<T>
+        where T : class
+    {
+        private readonly Lock gate = new();
+        private readonly Queue<T> received = new();
+
+        private TaskCompletionSource<T>? pending;
+
+        public void Push(T item)
+        {
+            TaskCompletionSource<T>? waiter;
+
+            lock (gate)
+            {
+                waiter = pending;
+                pending = null;
+
+                if (waiter is null)
+                {
+                    received.Enqueue(item);
+                }
+            }
+
+            waiter?.TrySetResult(item);
+        }
+
+        public async Task<T?> TryNextAsync(TimeSpan timeout)
+        {
+            TaskCompletionSource<T> waiter;
+
+            lock (gate)
+            {
+                if (received.TryDequeue(out T? alreadyHere))
+                {
+                    return alreadyHere;
+                }
+
+                waiter = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
+                pending = waiter;
+            }
+
+            using CancellationTokenSource cancellation = new(timeout);
+            using CancellationTokenRegistration registration =
+                cancellation.Token.Register(() => waiter.TrySetCanceled());
+
+            try
+            {
+                return await waiter.Task.ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                lock (gate)
+                {
+                    if (ReferenceEquals(pending, waiter))
+                    {
+                        pending = null;
+                    }
+                }
+
+                return null;
+            }
         }
     }
 }
