@@ -296,6 +296,39 @@ public sealed class AddStockQuotesTests
     }
 
     /// <summary>
+    /// The stock code is the quote path's only argument. A leftover second placeholder — most plausibly a
+    /// stale <c>&amp;token={1}</c> from when the Finnhub key travelled in the query string — would throw
+    /// <see cref="FormatException"/> on every lookup and be swallowed as "the quote service failed".
+    /// </summary>
+    [Theory]
+    [InlineData(FinnhubOptions.SectionName, "api/v1/quote?symbol={0}&token={1}")]
+    [InlineData(StooqOptions.SectionName, "q/d/l/?s={0}&i={1}")]
+    [InlineData(FinnhubOptions.SectionName, "api/v1/quote?symbol={0}&brace={")]
+    public async Task AddStockQuotes_QuotePathWithASecondPlaceholder_FailsAtStartup(string section, string path)
+    {
+        await using ServiceProvider services = WithSetting($"{section}:QuotePath", path);
+
+        services.GetRequiredService<IStartupValidator>()
+            .Invoking(validator => validator.Validate())
+            .Should().Throw<OptionsValidationException>()
+            .WithMessage($"*{section}:{nameof(FinnhubOptions.QuotePath)}*");
+    }
+
+    /// <summary>
+    /// Pins where the Finnhub credential travels. The default path carries no placeholder for it, because
+    /// it is sent as a header — a URL is what reaches logs and proxy records.
+    /// </summary>
+    [Fact]
+    public void FinnhubOptions_Defaults_KeepTheApiKeyOutOfTheUrl()
+    {
+        FinnhubOptions defaults = new();
+
+        defaults.QuotePath.Should().Be("api/v1/quote?symbol={0}");
+        defaults.QuotePath.Should().NotContain("token");
+        FinnhubOptions.ApiKeyHeader.Should().Be("X-Finnhub-Token");
+    }
+
+    /// <summary>
     /// Running keyless is a supported degraded mode — a friendly failure in chat and a <c>Degraded</c>
     /// health report — so it must not stop the host the way a mistyped endpoint does.
     /// </summary>

@@ -36,13 +36,45 @@ internal static class StockQuoteOptionsValidation
                 $"must be an absolute URL such as \"https://finnhub.io/\", but is \"{baseAddress.OriginalString}\"");
         }
 
-        if (!string.IsNullOrWhiteSpace(quotePath)
-            && !quotePath.Contains(SymbolPlaceholder, StringComparison.Ordinal))
+        if (string.IsNullOrWhiteSpace(quotePath))
+        {
+            yield break;
+        }
+
+        if (!quotePath.Contains(SymbolPlaceholder, StringComparison.Ordinal))
         {
             yield return Failure(
                 sectionName,
                 nameof(FinnhubOptions.QuotePath),
                 $"must contain the \"{SymbolPlaceholder}\" placeholder the stock code is written into");
+
+            yield break;
+        }
+
+        // The stock code is the only argument, so any further placeholder — a stale "&token={1}" from when
+        // the Finnhub key travelled in the query string, say — would throw FormatException at lookup time
+        // and be swallowed as "the quote service failed". Proven here instead, against the real formatter.
+        if (!FormatsWithTheSymbolAlone(quotePath))
+        {
+            yield return Failure(
+                sectionName,
+                nameof(FinnhubOptions.QuotePath),
+                $"must use \"{SymbolPlaceholder}\" as its only placeholder, and escape any other brace as "
+                + "\"{{\" or \"}}\"");
+        }
+    }
+
+    private static bool FormatsWithTheSymbolAlone(string quotePath)
+    {
+        try
+        {
+            _ = string.Format(CultureInfo.InvariantCulture, quotePath, "aapl.us");
+
+            return true;
+        }
+        catch (FormatException)
+        {
+            return false;
         }
     }
 

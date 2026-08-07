@@ -51,8 +51,11 @@ internal sealed class FinnhubClient(
 
         try
         {
+            // Buffered on purpose: MaxResponseContentBufferSize is only enforced when HttpClient buffers,
+            // so ResponseHeadersRead here would quietly drop the 64 KiB ceiling on a hostile endpoint.
+            using HttpRequestMessage request = BuildQuoteRequest(symbol);
             using HttpResponseMessage response = await httpClient
-                .GetAsync(BuildQuoteUri(symbol), cancellationToken)
+                .SendAsync(request, cancellationToken)
                 .ConfigureAwait(false);
 
             if (!response.IsSuccessStatusCode)
@@ -103,18 +106,26 @@ internal sealed class FinnhubClient(
     }
 
     /// <summary>
-    /// Builds the quote URL. The symbol comes from a validated <see cref="StockCode"/> and the key from
-    /// configuration; both are escaped, so neither can alter the query string.
+    /// Builds the quote request: the symbol in the URL, the API key in a header.
     /// </summary>
-    private Uri BuildQuoteUri(string symbol)
+    /// <remarks>
+    /// The symbol comes from a validated <see cref="StockCode"/> and is escaped anyway, so it cannot alter
+    /// the query string. The key travels as <see cref="FinnhubOptions.ApiKeyHeader"/> rather than the
+    /// <c>token</c> query parameter Finnhub also accepts — a credential in a URL is a credential in every
+    /// log and proxy record that URL passes through, and a header does not rely on the framework redacting
+    /// query values to stay out of them.
+    /// </remarks>
+    private HttpRequestMessage BuildQuoteRequest(string symbol)
     {
         string path = string.Format(
             CultureInfo.InvariantCulture,
             _options.QuotePath,
-            Uri.EscapeDataString(symbol),
-            Uri.EscapeDataString(_options.ApiKey));
+            Uri.EscapeDataString(symbol));
 
-        return new Uri(_options.BaseAddress, path);
+        HttpRequestMessage request = new(HttpMethod.Get, new Uri(_options.BaseAddress, path));
+        request.Headers.Add(FinnhubOptions.ApiKeyHeader, _options.ApiKey);
+
+        return request;
     }
 
     private static bool IsCallerCancellation(Exception exception, CancellationToken cancellationToken) =>

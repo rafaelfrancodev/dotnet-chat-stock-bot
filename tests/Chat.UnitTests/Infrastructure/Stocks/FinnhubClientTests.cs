@@ -35,7 +35,7 @@ public sealed class FinnhubClientTests
         new()
         {
             BaseAddress = new Uri("https://quotes.invalid/"),
-            QuotePath = "api/v1/quote?symbol={0}&token={1}",
+            QuotePath = "api/v1/quote?symbol={0}",
             TimeoutSeconds = 10,
             ApiKey = apiKey,
         };
@@ -84,9 +84,8 @@ public sealed class FinnhubClientTests
     }
 
     /// <summary>
-    /// The URL is composed from <see cref="FinnhubOptions"/>, the validated code and the configured key,
-    /// all escaped. The stubbed <c>HttpClient</c> has no base address, so a URL built anywhere else would
-    /// not even be absolute.
+    /// The URL is composed from <see cref="FinnhubOptions"/> and the validated code only. The stubbed
+    /// <c>HttpClient</c> has no base address, so a URL built anywhere else would not even be absolute.
     /// </summary>
     [Fact]
     public async Task GetQuoteAsync_Always_BuildsTheUrlFromTheOptionsAndTheValidatedCode()
@@ -98,16 +97,35 @@ public sealed class FinnhubClientTests
 
         handler.LastRequest!.Method.Should().Be(HttpMethod.Get);
         handler.LastRequest.RequestUri!.AbsoluteUri.Should()
-            .Be("https://quotes.invalid/api/v1/quote?symbol=AAPL&token=a-key");
+            .Be("https://quotes.invalid/api/v1/quote?symbol=AAPL");
     }
 
     /// <summary>
-    /// A key is operator-supplied text, not a validated value object, so it is the one part of the query
-    /// that could carry a delimiter. Escaping keeps it a single parameter value instead of letting it add
-    /// or overwrite one.
+    /// The key travels in a header, and the URL is what ends up in logs, proxy records and error reports.
+    /// Finnhub accepts a <c>token</c> query parameter too, so this pins the choice rather than leaving it
+    /// to whoever next edits the quote path.
     /// </summary>
     [Fact]
-    public async Task GetQuoteAsync_ApiKeyCarryingQueryDelimiters_EscapesItIntoASingleValue()
+    public async Task GetQuoteAsync_Always_SendsTheApiKeyAsAHeaderAndNeverInTheUrl()
+    {
+        const string key = "s3cret-key";
+        StubHandler handler = new(Responds(HttpStatusCode.OK, QuoteBody));
+        FinnhubClient client = Create(handler, key);
+
+        await client.GetQuoteAsync(Code("aapl.us"), CancellationToken.None);
+
+        handler.LastRequest!.Headers.GetValues(FinnhubOptions.ApiKeyHeader).Should().Equal(key);
+        handler.LastRequest.RequestUri!.AbsoluteUri.Should().NotContain(
+            key,
+            "a credential in a URL is a credential in every log that URL reaches");
+    }
+
+    /// <summary>
+    /// A key is operator-supplied text, so it could contain anything. In a header it needs no escaping —
+    /// what matters is that it cannot reach the query string and add or overwrite a parameter there.
+    /// </summary>
+    [Fact]
+    public async Task GetQuoteAsync_ApiKeyCarryingQueryDelimiters_CannotAlterTheQueryString()
     {
         StubHandler handler = new(Responds(HttpStatusCode.OK, QuoteBody));
         FinnhubClient client = Create(handler, "k&symbol=zzzz");
@@ -115,7 +133,7 @@ public sealed class FinnhubClientTests
         await client.GetQuoteAsync(Code("aapl.us"), CancellationToken.None);
 
         handler.LastRequest!.RequestUri!.AbsoluteUri.Should()
-            .Be("https://quotes.invalid/api/v1/quote?symbol=AAPL&token=k%26symbol%3Dzzzz");
+            .Be("https://quotes.invalid/api/v1/quote?symbol=AAPL");
     }
 
     /// <summary>

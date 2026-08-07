@@ -1,4 +1,5 @@
 using System.Net;
+using System.Net.Http.Headers;
 using Chat.Application;
 using Chat.Application.Abstractions.Hosting;
 using Chat.Application.Contracts.Messaging;
@@ -64,8 +65,8 @@ public sealed class StockQuoteResolutionTests
     }
 
     /// <summary>
-    /// The ticker reaches Finnhub in the form it expects: the chat's <c>aapl.us</c> becomes <c>AAPL</c>,
-    /// and the API key travels as a query parameter. Asserted on the request the client actually sent.
+    /// The ticker reaches Finnhub in the form it expects: the chat's <c>aapl.us</c> becomes <c>AAPL</c>.
+    /// Asserted on the request the client actually sent, through the real DI registration.
     /// </summary>
     [Fact]
     public async Task StockQuoteRequested_Always_CallsTheProviderWithTheTranslatedSymbol()
@@ -75,7 +76,24 @@ public sealed class StockQuoteResolutionTests
         await harness.ResolveAsync("aapl.us");
 
         harness.LastRequestUri.Should().NotBeNull();
-        harness.LastRequestUri!.AbsoluteUri.Should().Contain("symbol=AAPL").And.Contain($"token={ApiKey}");
+        harness.LastRequestUri!.AbsoluteUri.Should().Contain("symbol=AAPL");
+    }
+
+    /// <summary>
+    /// The API key travels in a header, never in the URL — a URL is what reaches logs and proxy records.
+    /// Finnhub accepts a <c>token</c> query parameter too, so the choice is pinned here rather than left to
+    /// whoever next edits the quote path.
+    /// </summary>
+    [Fact]
+    public async Task StockQuoteRequested_Always_SendsTheApiKeyAsAHeaderAndNeverInTheUrl()
+    {
+        await using Harness harness = await Harness.StartAsync(HttpStatusCode.OK, QuoteBody);
+
+        await harness.ResolveAsync("aapl.us");
+
+        harness.LastRequestHeaders.Should().NotBeNull();
+        harness.LastRequestHeaders!.GetValues(FinnhubOptions.ApiKeyHeader).Should().Equal(ApiKey);
+        harness.LastRequestUri!.AbsoluteUri.Should().NotContain(ApiKey);
     }
 
     /// <summary>
@@ -147,6 +165,9 @@ public sealed class StockQuoteResolutionTests
 
         /// <summary>The URL the quote client actually requested, for asserting symbol translation.</summary>
         public Uri? LastRequestUri => handler.LastRequestUri;
+
+        /// <summary>The headers it sent, for asserting the API key never reaches the URL.</summary>
+        public HttpRequestHeaders? LastRequestHeaders => handler.LastRequestHeaders;
 
         public static async Task<Harness> StartAsync(HttpStatusCode status, string body)
         {
@@ -229,11 +250,15 @@ public sealed class StockQuoteResolutionTests
     {
         public Uri? LastRequestUri { get; private set; }
 
+        /// <summary>Headers the quote client actually sent, for asserting where the credential travels.</summary>
+        public HttpRequestHeaders? LastRequestHeaders { get; private set; }
+
         protected override Task<HttpResponseMessage> SendAsync(
             HttpRequestMessage request,
             CancellationToken cancellationToken)
         {
             LastRequestUri = request.RequestUri;
+            LastRequestHeaders = request.Headers;
 
             return Task.FromResult(new HttpResponseMessage(status) { Content = new StringContent(body) });
         }
