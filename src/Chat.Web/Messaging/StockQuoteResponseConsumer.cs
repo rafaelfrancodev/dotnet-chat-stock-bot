@@ -18,8 +18,8 @@ namespace Chat.Web.Messaging;
 /// <item>
 /// <b>No manual nack or dead-letter path.</b> A payload MassTransit cannot deserialise never reaches this
 /// class — the transport moves it to <c>stock-quote-responses_error</c> rather than requeueing it — and a
-/// message this class throws on is retried by the configured policy (measured in task 1.10: four attempts
-/// about two seconds apart) and then moved to the same queue. Writing our own nack would duplicate that.
+/// message this class throws on is retried by the configured policy (measured: four attempts about two
+/// seconds apart) and then moved to the same queue. Writing our own nack would duplicate that.
 /// </item>
 /// <item>
 /// <b>An expected failure is logged and acknowledged.</b> A failed <see cref="Result"/> is deterministic:

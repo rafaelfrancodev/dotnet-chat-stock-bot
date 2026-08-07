@@ -9,8 +9,8 @@ namespace Chat.Infrastructure.HealthChecks;
 /// Verifies the broker is reachable and the configured credentials and virtual host are accepted.
 /// </summary>
 /// <remarks>
-/// This probe exists *alongside* MassTransit's own <c>masstransit-bus</c> check, and task 1.10 settled
-/// why by measuring both with a real receive endpoint running:
+/// This probe exists *alongside* MassTransit's own <c>masstransit-bus</c> check. Measuring both with a real
+/// receive endpoint running settled why:
 /// <list type="bullet">
 /// <item>broker already down at startup — the bus reports <c>Unhealthy</c> ("Not ready: not started");</item>
 /// <item>broker stopped after a healthy start — the bus reports <c>Degraded</c> ("Degraded Endpoints:

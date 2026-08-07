@@ -53,8 +53,9 @@ public static class StockQuoteAnswer
     /// The provider could not be reached, timed out, or answered with something unusable.
     /// </summary>
     /// <remarks>
-    /// This is the line a reviewer is most likely to read: Stooq's CSV endpoint has been answering 404
-    /// since task 1.14. It therefore names the ticker — several lookups may be in flight — and says the
+    /// This is the line a reviewer is most likely to read, since Stooq's CSV endpoint answers 404 and a
+    /// clone with no Finnhub key lands here. It therefore names the ticker — several lookups may be in
+    /// flight — and says the
     /// quote service, not the bot, is the part that failed. It carries no "try again in N minutes"
     /// instruction on purpose: <c>ChatAlert.QuoteServiceUnavailable</c> delivers that as a banner, and
     /// the two are meant to complement each other rather than repeat.

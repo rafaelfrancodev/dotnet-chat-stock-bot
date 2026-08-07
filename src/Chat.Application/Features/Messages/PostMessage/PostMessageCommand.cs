@@ -11,7 +11,7 @@ namespace Chat.Application.Features.Messages.PostMessage;
 /// never decides which.
 /// </summary>
 /// <remarks>
-/// <b>Contract with the transport layer (the SignalR hub, task 1.12):</b> a client message carries only
+/// <b>Contract with the transport layer (the SignalR hub):</b> a client message carries only
 /// <c>ChatRoomId</c> and <c>RawInput</c>. <c>AuthorUserId</c> and <c>AuthorDisplayName</c> are filled by
 /// the hub from <c>Context.User</c> — the authenticated principal — and must never be read from the
 /// client payload. Nothing in this layer can tell a forged author from a real one, so the only safe
