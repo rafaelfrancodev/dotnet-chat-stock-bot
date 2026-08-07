@@ -22,7 +22,7 @@ which is why the second one exists and is now the default — see
 | Post owner is the bot | `Message.PostByBot` — takes no author, uses `MessageAuthor.Bot` |
 | Ordered by timestamp, last 50 only | `MessageRepository.GetLatestAsync`, capped in `GetLatestMessagesValidator` |
 | The stock command is never persisted | Enforced structurally in four layers — see [Design decisions](#design-decisions) |
-| Unit tests | 539 tests in `tests/Chat.UnitTests`, plus 19 in `tests/Chat.IntegrationTests` |
+| Unit tests | 590 tests in `tests/Chat.UnitTests`, plus 19 in `tests/Chat.IntegrationTests` |
 
 ---
 
@@ -88,6 +88,15 @@ Each host has its own secret store, keyed by the `UserSecretsId` in its `.csproj
 | `RabbitMq:UserName` / `RabbitMq:Password` | **required** | **required** | Both processes talk to the broker; that is the only thing they share |
 | `Stocks:Provider` | — | optional | `Finnhub` (default) or `Stooq` |
 | `Finnhub:ApiKey` | — | **required** for a real price | Free key from finnhub.io. Only the bot calls a quote service; without it the bot answers a friendly failure |
+
+**Mistyped settings stop the host, not a chat message.** The quote-provider sections are validated with
+`ValidateDataAnnotations().ValidateOnStart()`, plus two checks data annotations cannot express: the base
+address must be *absolute* and the quote path must contain the `{0}` the stock code is written into. Both
+matter — measured, `Finnhub:BaseAddress=not a uri` binds happily to a valid **relative** `Uri`, satisfying
+`[Required]`, and would then throw inside the bot's consumer, costing four delivery attempts and a
+dead-lettered request before anyone saw the typo. A missing `Finnhub:ApiKey` is deliberately *not* a
+validation failure: running keyless is a supported degraded mode, reported by `/health` and answered
+politely in chat.
 
 **The short way — one command for all of it.** Everything except the Finnhub key already lives in `.env`,
 so a script reads it and writes each value to the host that needs it:
@@ -224,12 +233,15 @@ A dismissible **help panel** at the top of the chat page explains all of this in
    - An unknown command (`/help`) or a rejected ticker (`/stock=a&b`) shows a red `not sent — …` line to
      the sender alone. Neither reaches the room.
    - A message from **`Bot`** appears in **both** windows.
-   - **With `Stocks:Provider=Finnhub` configured**, that message reads
-     `AAPL.US quote is $311.51 per share` — a real price. Verified end to end on 2026-08-06.
-   - **On the default Stooq provider**, its CSV endpoint is no longer reachable from a server, so the bot
-     answers `I could not reach the quote service, so I have no price for AAPL.US right now.` and the
-     window that asked also gets a red banner. Both paths are correct behaviour; see
-     [Quote providers](#quote-providers--stooq-and-finnhub).
+   - **On the default Finnhub provider with `Finnhub:ApiKey` set**, that message reads
+     `AAPL.US quote is $311.51 per share` — a real price. Verified end to end on 2026-08-06. This is the
+     line the challenge specifies, so set the key before you walk through this step.
+   - **Without a key**, or with `Stocks:Provider=Stooq` (whose CSV endpoint is no longer reachable from a
+     server), the bot instead answers
+     `I could not reach the quote service, so I have no price for AAPL.US right now.` and the window that
+     asked also gets a red banner. Both paths are correct behaviour; see
+     [Quote providers](#quote-providers--stooq-and-finnhub). `GET http://localhost:5299/health` names the
+     configured provider and reports a missing key, so it tells you which of the two you are looking at.
    - Try `/stock=zzzznotreal.us` too: an unknown symbol gets a friendly
      `Sorry, I could not find a quote for ZZZZNOTREAL.US.` and **no** banner, because the service is
      working — only a service failure raises the banner.
@@ -291,13 +303,14 @@ consuming requests and answering politely — still works.
 dotnet test
 ```
 
-**558 tests, all passing** — 539 unit tests and 19 integration tests.
+**609 tests, all passing** — 590 unit tests and 19 integration tests.
 
-`tests/Chat.UnitTests` (539) is **hermetic**: no containers, no broker, no network access, about three
+`tests/Chat.UnitTests` (590) is **hermetic**: no containers, no broker, no network access, about four
 seconds. Database behaviour is covered by translating EF Core queries offline (`ToQueryString()`) and by
 SQLite in process memory where a real unique index is needed; messaging is covered by MassTransit's
-in-memory `ITestHarness`; Stooq is covered by a stubbed `HttpMessageHandler` pointed at a
-deliberately-unroutable host so a bypassed stub fails loudly instead of calling the real service.
+in-memory `ITestHarness`; **both** quote providers are covered by a stubbed `HttpMessageHandler` pointed at
+a deliberately-unroutable host so a bypassed stub fails loudly instead of calling the real service — and,
+for Finnhub, without spending the free key's rate budget.
 
 `tests/Chat.IntegrationTests` (19) splits by what it needs. Eleven host the real `Chat.Web` with
 `WebApplicationFactory` against a **throwaway SQL Server container** (`Testcontainers.MsSql`, the same image
@@ -319,7 +332,7 @@ gap must not read as a broken build. The same switch is available deliberately:
 CHAT_TESTS_SKIP_DOCKER=1 dotnet test    # PowerShell: $env:CHAT_TESTS_SKIP_DOCKER='1'
 ```
 
-Measured with it set: 539 unit passed, then 8 passed / 11 skipped / 0 failed, exit code 0.
+Measured with it set: 590 unit passed, then 8 passed / 11 skipped / 0 failed, exit code 0.
 
 Other gates:
 
@@ -385,6 +398,13 @@ converting a `StockQuote` into a plain message, which the type system forbids; `
 — the whole `/stock=` path — is constructed with no persistence port at all, and a reflection test pins
 that; and the `switch` ends in `UnreachableException`, so a new input kind fails loudly instead of falling
 into the persist branch.
+
+**The bot's own decoupling is asserted, not just documented.** Its registrations live in
+`Chat.Bot/BotServiceCollectionExtensions.AddBotServices` rather than inline in `Program.cs`, precisely so a
+test can call them: `BotCompositionTests` fails if any registered service or implementation type comes from
+EF Core, `Microsoft.Data.SqlClient`, ASP.NET Core Identity or either `Persistence` namespace. A top-level
+statement file cannot be invoked from a test, so as long as the registrations lived there, "the bot never
+calls `AddPersistence()`" was a comment that nothing enforced.
 
 **Bot answers *are* persisted; the outage banner is not.** The challenge forbids persisting the command,
 not the answer, and says the post owner should be the bot — so it is a post. A quote that vanished on

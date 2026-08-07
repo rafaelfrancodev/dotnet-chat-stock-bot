@@ -19,9 +19,11 @@ Hard constraints:
 
 Bonus (track status honestly — reported in delivery email):
 - [ ] Multiple chatrooms
-- [ ] .NET Identity authentication
-- [ ] Bot handles unknown commands/exceptions gracefully
+- [x] .NET Identity authentication
+- [x] Bot handles unknown commands/exceptions gracefully
 - [ ] Installer
+
+`README.md` §"Bonus features" is the authoritative status and the wording the delivery email must match.
 
 ## Architecture
 
@@ -35,8 +37,9 @@ src/
   Chat.Web/             # Composition root, Razor Pages, health endpoints. Identity UI from 1.11, SignalR hub from 1.12.
   Chat.Bot/             # Request consumer + quote worker + /health. No persistence, ever.
 tests/
-  Chat.UnitTests/       # 209 tests: domain, port shape, EF model and the generated read SQL.
-  Chat.IntegrationTests/  # empty until 1.17.
+  Chat.UnitTests/       # 590 tests: domain, port shape, EF model and the generated read SQL, handlers,
+                        #   both quote adapters, DI composition, health checks.
+  Chat.IntegrationTests/  # 19 tests: 11 need Docker (SQL Server via Testcontainers), 8 do not.
 ```
 
 Dependency rule: Web/Bot → Infrastructure → Application → Domain. Never the other way. `AbstractionsTests` asserts the compiled `Chat.Application` assembly references no EF Core, MassTransit, ASP.NET Core or RabbitMQ.Client.
@@ -71,7 +74,7 @@ dotnet tool restore                           # once — pins dotnet-ef 10.0.10 
 docker compose -f docker-compose.dev.yml up -d   # SQL Server 2022 + RabbitMQ 4 (UI: http://localhost:15672)
 docker compose -f docker-compose.dev.yml ps      # wait for both to report (healthy)
 dotnet build                                  # 0 warnings expected (TreatWarningsAsErrors)
-dotnet test                                   # 539 unit (hermetic) + 19 integration (needs Docker)
+dotnet test                                   # 590 unit (hermetic) + 19 integration (11 of those need Docker)
 dotnet format                                 # before committing
 dotnet format --verify-no-changes             # CI-style gate
 
@@ -134,8 +137,8 @@ Agents: `architect`, `implementer`, `test-engineer`, `code-reviewer`, `docs-main
 - [x] Phase 1 domain + persistence (1.1–1.7): message/room value objects, `ChatCommandParser`, `Message` and `ChatRoom` aggregates, the eight Application ports, EF Core + Identity model and the applied `InitialCreate` migration.
 - [x] Phase 1 mandatory (1.8–1.17): handlers, MassTransit publishers/endpoints, Identity + auth, hub, chat page with help panel, quote providers, bot worker, response consumer, integration suite. The full `/stock=` round trip works end to end.
 - [ ] 1.18 recorded manual walkthrough; bonuses 2.2 (multiple rooms), 2.4 (rate limit), 2.5 (installer).
-- [ ] Bonus features (see checklist above). `ApplicationUser` and the Identity tables exist from 1.7, but authentication and the UI are task 1.11 — the Identity bonus is not claimable yet.
-- [ ] README written and verified (task 3.1 — `README.md` does not exist yet).
+- [ ] Bonus features (see checklist above). Identity authentication and its UI landed in 1.11, so that bonus **is** claimable; multiple rooms, rate limiting and the installer are not.
+- [x] README written and verified (task 3.1) — graded deliverable, keep it in step with every change.
 - [ ] Final review + delivery zip/repo (include `.git/`).
 
 ## Gotchas
@@ -150,8 +153,11 @@ Agents: `architect`, `implementer`, `test-engineer`, `code-reviewer`, `docs-main
 - `dotnet build` can report 0 warnings while `dotnet format --verify-no-changes` still fails on whitespace and layout (measured). Run `dotnet format` before every commit, not just the build.
 - `MSSQL_SA_PASSWORD` is baked into the SQL Server volume on first start; changing it in `.env` later needs `docker compose -f docker-compose.dev.yml down -v`, and it must satisfy SQL Server's complexity policy or the container exits at boot. First start takes ~30 s; the compose healthcheck covers it and `AddPersistence` uses `EnableRetryOnFailure` so `dotnet run` does not race the container.
 - Connection strings must carry `TrustServerCertificate=True` locally — the container uses a self-signed certificate and Microsoft.Data.SqlClient 4+ encrypts by default.
-- `dotnet test` prints "No test is available" for `Chat.IntegrationTests` until task 1.17 lands; exit code is still 0.
-- `Chat.Bot` must never call `AddPersistence()` — that is the structural guarantee it stays decoupled from the database. It is a `Microsoft.NET.Sdk.Web` host purely so it can serve `/health`; it exposes no chat surface.
+- Without Docker, 11 integration tests skip and 8 still run; exit code is 0 either way (`CHAT_TESTS_SKIP_DOCKER=1` forces the skip).
+- `Chat.Bot` must never call `AddPersistence()` — that is the structural guarantee it stays decoupled from the database. It is a `Microsoft.NET.Sdk.Web` host purely so it can serve `/health`; it exposes no chat surface. **That guarantee is now asserted**: its registrations live in `Chat.Bot/BotServiceCollectionExtensions.AddBotServices`, and `BotCompositionTests` fails if any descriptor's service or implementation type comes from EF Core, SqlClient, Identity or either `Persistence` namespace. `Program.cs` is a top-level statement file no test can call, which is why the registrations had to move out of it.
+- Both quote providers' options are `ValidateDataAnnotations().ValidateOnStart()`. Data annotations alone are not enough: `UriTypeConverter` binds *any* string, so `Finnhub:BaseAddress=not a uri` becomes a valid **relative** `Uri` that satisfies `[Required]` and only throws later inside `Consume`. `StockQuoteOptionsValidation` adds the absolute-URL and `{0}`-placeholder checks. A missing `Finnhub:ApiKey` is deliberately **not** a validation failure — keyless is a supported degraded mode.
+- Shared outbound HTTP budget lives in `Stocks/StockQuoteHttpDefaults` (attempts, retry delay, response ceiling), never on one adapter. Only `TimeoutSeconds` is per-provider, and `ConfigureQuoteResilience` is the single pipeline both registrations use.
+- `appsettings.json` may carry real `//` comments — the JSON configuration provider parses with `JsonCommentHandling.Skip`. Do not fake them as `"// Key": "explanation"` string entries; those bind as configuration keys.
 - `InvariantGlobalization` must stay `false`. `Microsoft.Data.SqlClient` throws "Globalization Invariant Mode is not supported" at connection time, so EF Core and the SQL health check both fail under it.
 - Use `127.0.0.1`, never `localhost`, in connection strings and broker host names. The compose file publishes on IPv4 loopback only, but `localhost` resolves to `::1` first on Windows — SqlClient then burns its full 15 s timeout before failing.
 - Health checks live in `Chat.Infrastructure/HealthChecks` and are mapped by `MapChatHealthChecks()`. Stooq is tagged `external` and excluded from `/health/ready` — a third-party outage must not mark the bot unready.
