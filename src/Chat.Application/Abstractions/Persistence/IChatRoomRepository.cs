@@ -4,8 +4,7 @@ using Chat.Domain.ChatRooms;
 namespace Chat.Application.Abstractions.Persistence;
 
 /// <summary>
-/// Access to chat rooms. Phase 1 needs only existence checks and creation; the multiple-rooms bonus
-/// adds listing and duplicate-name detection.
+/// Access to chat rooms: existence checks, creation, name lookup and the room list the picker renders.
 /// </summary>
 public interface IChatRoomRepository
 {
@@ -30,8 +29,21 @@ public interface IChatRoomRepository
     Task<bool> ExistsAsync(ChatRoomId chatRoomId, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Every room, ordered by name, as the projection the room picker renders.
+    /// </summary>
+    /// <remarks>
+    /// Unpaged deliberately, and it is the one read in the system that is: a room directory is
+    /// operator-scale, not user-scale — rooms are created by hand and counted in dozens, unlike messages,
+    /// which is why <see cref="IMessageRepository"/> caps its read at 50 and this does not. Ordering by
+    /// name rather than creation time keeps the list stable as rooms are added, so a participant's chosen
+    /// room does not move under the cursor.
+    /// </remarks>
+    /// <param name="cancellationToken">Cancels the query.</param>
+    Task<IReadOnlyList<ChatRoomDto>> ListAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Finds a room by its name, or <see langword="null"/> when no room carries it. The chat page uses
-    /// this to resolve the room it opens on; the multiple-rooms bonus reuses it to reject duplicates.
+    /// this to resolve the room it opens on, and room creation uses it to reject a duplicate name.
     /// </summary>
     /// <remarks>
     /// Returns a projection, not the aggregate: this is a read path, and the caller renders a name and

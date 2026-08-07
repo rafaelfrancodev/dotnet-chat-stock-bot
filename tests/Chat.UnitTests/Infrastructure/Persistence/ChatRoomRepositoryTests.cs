@@ -67,6 +67,44 @@ public sealed class ChatRoomRepositoryTests : IDisposable
     }
 
     [Fact]
+    public void AllRoomsQuery_OrdersInTheDatabase_AndSelectsOnlyWhatIsRendered()
+    {
+        using ChatDbContext context = TestDatabase.CreateContext();
+
+        string sql = ChatRoomRepository.AllRoomsQuery(context).ToQueryString();
+
+        sql.Should().Contain("ORDER BY [c].[Name]", "the picker's order is the database's job, not a sort in memory");
+        sql.Should().Contain("[c].[Id]").And.Contain("[c].[Name]");
+        sql.Should().NotContain("[c].[CreatedAtUtc]", "nothing renders the creation instant");
+        sql.Should().NotContain("SELECT *");
+    }
+
+    /// <summary>
+    /// Ordered by name so the picker does not reshuffle as rooms are created. Asserted against a real
+    /// database rather than a stub, because it is the provider that does the sorting.
+    /// </summary>
+    [Fact]
+    public async Task ListAsync_SeveralRooms_ReturnsThemAllOrderedByName()
+    {
+        await AddRoomAsync("Trading floor");
+        await AddRoomAsync(ChatRoomConstants.DefaultRoomName);
+        await AddRoomAsync("Alerts");
+
+        IReadOnlyList<ChatRoomDto> rooms = await ListAsync();
+
+        rooms.Select(room => room.Name).Should().Equal("Alerts", ChatRoomConstants.DefaultRoomName, "Trading floor");
+        rooms.Should().OnlyContain(room => room.Id != Guid.Empty, "the picker joins each room by its id");
+    }
+
+    [Fact]
+    public async Task ListAsync_UnseededDatabase_ReturnsAnEmptyList()
+    {
+        IReadOnlyList<ChatRoomDto> rooms = await ListAsync();
+
+        rooms.Should().BeEmpty("no rooms is an expected state, not an error");
+    }
+
+    [Fact]
     public async Task FindByNameAsync_NullName_Throws()
     {
         await using ChatDbContext context = TestDatabase.CreateInMemoryContext(_connection);
@@ -86,6 +124,14 @@ public sealed class ChatRoomRepositoryTests : IDisposable
         await context.SaveChangesAsync(CancellationToken.None);
 
         return room;
+    }
+
+    private async Task<IReadOnlyList<ChatRoomDto>> ListAsync()
+    {
+        await using ChatDbContext context = TestDatabase.CreateInMemoryContext(_connection);
+        ChatRoomRepository repository = new(context);
+
+        return await repository.ListAsync(CancellationToken.None);
     }
 
     private async Task<ChatRoomDto?> FindAsync(string name)

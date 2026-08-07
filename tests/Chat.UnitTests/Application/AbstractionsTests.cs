@@ -24,6 +24,7 @@ public sealed class AbstractionsTests
         typeof(IChatRoomRepository),
         typeof(IUnitOfWork),
         typeof(IChatNotifier),
+        typeof(IChatRoomNotifier),
         typeof(IStockQuoteRequester),
         typeof(IStockQuoteResponder),
         typeof(IStockQuoteProvider),
@@ -129,8 +130,10 @@ public sealed class AbstractionsTests
         [
             "IChatNotifier.BroadcastMessageAsync",
             "IChatNotifier.NotifyAlertAsync",
+            "IChatRoomNotifier.RoomCreatedAsync",
             "IChatRoomRepository.ExistsAsync",
             "IChatRoomRepository.FindByNameAsync",
+            "IChatRoomRepository.ListAsync",
             "IMessageRepository.GetLatestAsync",
             "IStockQuoteProvider.GetQuoteAsync",
             "IStockQuoteRequester.RequestAsync",

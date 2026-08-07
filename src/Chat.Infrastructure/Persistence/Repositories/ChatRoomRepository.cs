@@ -38,6 +38,34 @@ internal sealed class ChatRoomRepository(ChatDbContext context) : IChatRoomRepos
         return row is null ? null : new ChatRoomDto(row.Id.Value, row.Name.Value);
     }
 
+    /// <inheritdoc/>
+    public async Task<IReadOnlyList<ChatRoomDto>> ListAsync(CancellationToken cancellationToken = default)
+    {
+        List<ChatRoomRow> rows = await AllRoomsQuery(context)
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        // Unwrapped in memory for the same reason as the latest-messages read: EF Core cannot translate
+        // member access on a value-converted type, so the projection selects the value objects and one
+        // loop turns them into the DTO.
+        return [.. rows.Select(row => new ChatRoomDto(row.Id.Value, row.Name.Value))];
+    }
+
+    /// <summary>
+    /// The "all rooms" query: no tracking, no entity materialisation, two columns, ordered by name so the
+    /// picker is stable as rooms are added.
+    /// </summary>
+    /// <remarks>
+    /// Unpaged, and the only read in the system that is — see <see cref="IChatRoomRepository.ListAsync"/>
+    /// for why a room directory is not the same kind of collection as a message history. <c>ORDER BY</c> is
+    /// on the stored column, so the unique index on <c>ChatRooms.Name</c> can serve it without a sort.
+    /// </remarks>
+    internal static IQueryable<ChatRoomRow> AllRoomsQuery(ChatDbContext context) =>
+        context.ChatRooms
+            .AsNoTracking()
+            .OrderBy(room => room.Name)
+            .Select(room => new ChatRoomRow(room.Id, room.Name));
+
     /// <summary>
     /// The "room with this name" query: no tracking, no entity materialisation, and only the two columns
     /// a caller renders. The unique index on <c>ChatRooms.Name</c> serves the filter.
