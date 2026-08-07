@@ -896,9 +896,31 @@ requirements are implemented and verified end-to-end. Outstanding items, tracked
 | Task | Item |
 | --- | --- |
 | 1.18 | The manual end-to-end walkthrough recorded in `docs/ARCHITECTURE.md` |
-| 2.2 | Multiple chatrooms (bonus) |
-| 2.4 | Per-user posting rate limit (bonus) |
+| 2.3 | Hardening *tests* for malformed-payload dead-lettering and broker-restart recovery (the behaviour is implemented and measured; the two tests are not written) |
+| 2.4 | Per-user posting rate limit (bonus) — considered, deliberately not built; see below |
 | 2.5 | Installer (bonus) |
+
+**Per-user rate limit — considered and deliberately left out.** It is named in
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §8 as both a security and a resource concern, so this is a
+decision rather than an oversight, and the reasoning is worth stating.
+
+The obvious implementation does not work here: ASP.NET Core's `AddRateLimiter` middleware counts **HTTP
+requests**, and a SignalR connection is one request no matter how many messages travel over it. Only
+`negotiate` would ever be throttled. A per-message limit therefore has to live where the messages are — a
+`RateLimitBehavior` in the MediatR pipeline keyed on the authenticated user id, returning a failed `Result`
+that the hub already knows how to deliver to the caller alone. That part would be small.
+
+What stopped it is the part that is not small. An in-memory counter is per-instance, so it would be a second
+place in the codebase whose correctness depends on there being exactly one host — and the scale-out limits
+that already exist are documented rather than pretended away (§4 of `docs/ARCHITECTURE.md`). More
+importantly, it is the only outstanding bonus that can **reject a legitimate message**: a wrong threshold
+turns a working chat into one that silently drops what a participant typed. Shipping that untuned, days
+before a review in which two people will type quickly at each other, trades a real risk for a checkbox.
+
+The resource concern the challenge actually raises is addressed by other means, which are implemented and
+measured: broker prefetch is bounded at 10, the outbound quote call has a 3-attempt budget and a 64 KiB
+response ceiling, the history read is capped at 50 rows in SQL and cannot be widened by a client, and
+broadcasts are per-room groups rather than `Clients.All`.
 
 No screenshot is included: the UI is deliberately minimal, since the challenge states the backend is what
 is evaluated.

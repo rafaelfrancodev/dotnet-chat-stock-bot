@@ -147,7 +147,8 @@ Agents: `architect`, `implementer`, `test-engineer`, `code-reviewer`, `docs-main
 - [x] Phase 1 domain + persistence (1.1–1.7): message/room value objects, `ChatCommandParser`, `Message` and `ChatRoom` aggregates, the eight Application ports, EF Core + Identity model and the applied `InitialCreate` migration.
 - [x] Phase 1 mandatory (1.8–1.17): handlers, MassTransit publishers/endpoints, Identity + auth, hub, chat page with help panel, quote providers, bot worker, response consumer, integration suite. The full `/stock=` round trip works end to end.
 - [x] Bonus 2.2 multiple chatrooms: `CreateRoom` + `ListRooms` use cases, room picker and create box on the chat page, per-room isolation asserted end to end. No schema change or migration — `ChatRoom` and `ChatRoomId` were already load-bearing.
-- [ ] 1.18 recorded manual walkthrough; bonuses 2.4 (rate limit), 2.5 (installer).
+- [ ] 1.18 recorded manual walkthrough; 2.3 hardening tests; bonus 2.5 (installer).
+- [ ] Bonus 2.4 per-user rate limit — **considered and deliberately not built**, reasoning recorded in README §"What is not finished". `AddRateLimiter` cannot do it (it counts HTTP requests; a SignalR connection is one request however many messages cross it), so it would need a `RateLimitBehavior` in the MediatR pipeline keyed on the user id. Left out because an in-memory counter is per-instance and because it is the only outstanding bonus that can reject a legitimate message.
 - [ ] Bonus features (see checklist above). Identity authentication and its UI landed in 1.11, so that bonus **is** claimable; multiple rooms, rate limiting and the installer are not.
 - [x] README written and verified (task 3.1) — graded deliverable, keep it in step with every change.
 - [ ] Final review + delivery zip/repo (include `.git/`).
