@@ -1,0 +1,78 @@
+name: Deploy to Development
+
+# Coolify builds the images itself from docker-compose.yml, so this workflow does not push one. What
+# it does is refuse to trigger a deployment that would not have passed CI: the gates run here first,
+# and only a green run reaches the webhook.
+on:
+  release:
+    types: [prereleased]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-dev
+  cancel-in-progress: true
+
+env:
+  DOTNET_NOLOGO: "true"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "true"
+
+jobs:
+  verify:
+    name: Verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Empty for workflow_dispatch, in which case the default checkout ref is used.
+          ref: ${{ github.event.release.tag_name }}
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('Directory.Packages.props') }}
+          restore-keys: nuget-${{ runner.os }}-
+
+      - name: Restore
+        run: dotnet restore
+
+      - name: Build
+        run: dotnet build --configuration Release --no-restore
+
+      - name: Unit tests
+        run: dotnet test tests/Chat.UnitTests --configuration Release --no-build
+
+      - name: Integration tests
+        run: dotnet test tests/Chat.IntegrationTests --configuration Release --no-build
+
+      - name: Build the container images
+        # The same two images Coolify will build, built here as well. It costs a few minutes and it is
+        # the only thing that catches a Dockerfile that no longer restores — a failure the .NET build
+        # above cannot see, because it never enters a container.
+        run: |
+          docker build -f src/Chat.Web/Dockerfile -t chat-web:ci .
+          docker build -f src/Chat.Bot/Dockerfile -t chat-bot:ci .
+
+  deploy:
+    name: Deploy to Coolify
+    runs-on: ubuntu-latest
+    needs: verify
+    environment: development
+    timeout-minutes: 10
+
+    steps:
+      - name: Trigger Coolify deployment
+        # Coolify pulls the repository and runs docker-compose.yml itself; this only asks it to start.
+        # --fail-with-body so a rejected webhook fails the job and prints why, instead of a green tick
+        # over an HTTP 401.
+        run: |
+          curl --fail-with-body --silent --show-error \
+            -X GET "${{ secrets.COOLIFY_WEBHOOK_DEVELOPMENT }}" \
+            -H "Authorization: Bearer ${{ secrets.COOLIFY_TOKEN_DEVELOPMENT }}"

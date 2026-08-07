@@ -1,0 +1,100 @@
+name: CI
+
+# Pull requests against any branch, plus every commit that lands on main. Pushing to main runs the
+# same checks a PR would — a temporary arrangement while the work is going straight to main.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  # Keyed on the ref so a PR and a push to main never cancel each other.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOTNET_NOLOGO: "true"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "true"
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: "true"
+
+jobs:
+  # ────────────────────────────────────────────────────────────────────────────
+  # Job 1: format, build and the hermetic unit tests. No containers, no network.
+  # ────────────────────────────────────────────────────────────────────────────
+  build-and-unit:
+    name: Build & Unit Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          # global.json pins the SDK, so CI and a developer's machine cannot drift.
+          global-json-file: global.json
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          # Central package management: every version lives in one file, so it is the whole key.
+          key: nuget-${{ runner.os }}-${{ hashFiles('Directory.Packages.props') }}
+          restore-keys: nuget-${{ runner.os }}-
+
+      - name: Restore
+        run: dotnet restore
+
+      - name: Verify formatting
+        # A separate gate on purpose: `dotnet build` reports 0 warnings while whitespace and layout
+        # violations are still present — measured on this repository more than once.
+        run: dotnet format --verify-no-changes --no-restore
+
+      - name: Build
+        # TreatWarningsAsErrors and EnforceCodeStyleInBuild are on, so an unused using fails here.
+        run: dotnet build --configuration Release --no-restore
+
+      - name: Unit tests
+        run: dotnet test tests/Chat.UnitTests --configuration Release --no-build --verbosity normal
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Job 2: integration tests. Testcontainers starts a throwaway SQL Server, so
+  # this one needs the runner's Docker daemon — which ubuntu-latest provides.
+  # RabbitMQ is not needed: the bus is MassTransit's in-memory test harness.
+  # ────────────────────────────────────────────────────────────────────────────
+  integration:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    # Longer: the first run pulls the SQL Server image (~1.5 GB) and waits for it to accept logins.
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('Directory.Packages.props') }}
+          restore-keys: nuget-${{ runner.os }}-
+
+      - name: Pull SQL Server image
+        # Pulled as its own step so a slow or failed pull is reported as exactly that, instead of
+        # surfacing as an unattributed container-start timeout inside the fixture.
+        run: docker pull mcr.microsoft.com/mssql/server:2022-latest
+
+      - name: Restore
+        run: dotnet restore
+
+      - name: Build
+        run: dotnet build --configuration Release --no-restore
+
+      - name: Integration tests
+        run: dotnet test tests/Chat.IntegrationTests --configuration Release --no-build --verbosity normal
