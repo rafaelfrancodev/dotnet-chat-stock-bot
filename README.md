@@ -12,10 +12,11 @@ which is why the second one exists and is now the default — see
 [Quote providers](#quote-providers--stooq-and-finnhub).
 
 **Running live:** [chat-stock-app.joya.services](https://chat-stock-app.joya.services) — register two users
-in two browser windows and try `/stock=aapl.us`. The bot's own health, including which quote provider it is
-configured for, is at [chat-stock-bot.joya.services/health](https://chat-stock-bot.joya.services/health).
-Everything below also runs locally; see [Deployment](#deployment-docker--coolify) for how that instance is
-put together.
+in two browser windows and try `/stock=aapl.us`. Both processes report their own dependencies:
+[the chat's `/health`](https://chat-stock-app.joya.services/health) (SQL Server, RabbitMQ, the bus) and
+[the bot's `/health`](https://chat-stock-bot.joya.services/health), which also names the quote provider it is
+configured for. Everything below also runs locally; see [Deployment](#deployment-docker--coolify) for how
+that instance is put together.
 
 ## Mandatory requirements and where they are
 
@@ -382,13 +383,20 @@ and layout violations are still present, measured on this repository more than o
 
 **Live:** the stack is deployed on a VPS behind Coolify and Cloudflare.
 
-| | |
+| What | URL |
 | --- | --- |
 | Chat | https://chat-stock-app.joya.services |
-| Bot health | https://chat-stock-bot.joya.services/health |
+| Chat health | https://chat-stock-app.joya.services/health — `sql-server`, `rabbitmq`, `masstransit-bus` |
+| Chat readiness / liveness | `…/health/ready` and `…/health/live` |
+| Bot health | https://chat-stock-bot.joya.services/health — `rabbitmq`, `stock-quote-provider`, `masstransit-bus` |
 
-Both verified answering at the time of writing; the bot's `/health` reports `stock-quote-provider: Healthy —
-"Finnhub responded 200."`, so the deployment resolves real prices rather than the keyless fallback.
+Verified answering at the time of writing, and the bot's `/health` reports `stock-quote-provider: Healthy —
+"Finnhub responded 200."` — so the deployment resolves real prices rather than the keyless fallback.
+
+**During a redeploy, `/health` on the chat legitimately answers 503 while `/health/live` stays 200.** That is
+the whole point of having both: the container is alive and its dependencies are not back yet. It is also why
+the compose healthcheck probes liveness — a readiness probe there would let a database restart look like a
+sick process and get it restarted, underneath the retry logic that was about to recover it.
 
 `docker-compose.yml` is the deployable stack: both application processes plus SQL Server and RabbitMQ.
 `docker-compose.dev.yml` remains the *development* file and starts infrastructure only.
