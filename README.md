@@ -22,7 +22,7 @@ which is why the second one exists and is now the default — see
 | Post owner is the bot | `Message.PostByBot` — takes no author, uses `MessageAuthor.Bot` |
 | Ordered by timestamp, last 50 only | `MessageRepository.GetLatestAsync`, capped in `GetLatestMessagesValidator` |
 | The stock command is never persisted | Enforced structurally in four layers — see [Design decisions](#design-decisions) |
-| Unit tests | 595 tests in `tests/Chat.UnitTests`, plus 20 in `tests/Chat.IntegrationTests` |
+| Unit tests | 632 tests in `tests/Chat.UnitTests`, plus 29 in `tests/Chat.IntegrationTests` |
 
 ---
 
@@ -250,6 +250,11 @@ A dismissible **help panel** at the top of the chat page explains all of this in
    room sees nothing and nothing is stored.
 6. Refresh either window. The chat history — including the bot's answer, but not the command — reloads
    in timestamp order.
+7. **Multiple rooms** (bonus). In one window, type a name into **New room** and press **Create and join**.
+   That window switches to the empty room; the other window's **Room** list gains it immediately, without a
+   reload. Now post in the new room: only the window that joined it sees the line. Switch the second window
+   to the same room and both see each other again, with the new room's own history. Switch back to
+   `General` and the earlier conversation is still there, unchanged.
 
 Everything above was exercised end-to-end against the running stack on 2026-08-05 with two authenticated
 users in the seeded `General` room. `SELECT COUNT(*) FROM Messages WHERE Content LIKE '/%'` returned
@@ -303,27 +308,29 @@ consuming requests and answering politely — still works.
 dotnet test
 ```
 
-**615 tests, all passing** — 595 unit tests and 20 integration tests.
+**661 tests, all passing** — 632 unit tests and 29 integration tests.
 
-`tests/Chat.UnitTests` (595) is **hermetic**: no containers, no broker, no network access, about four
+`tests/Chat.UnitTests` (632) is **hermetic**: no containers, no broker, no network access, about four
 seconds. Database behaviour is covered by translating EF Core queries offline (`ToQueryString()`) and by
 SQLite in process memory where a real unique index is needed; messaging is covered by MassTransit's
 in-memory `ITestHarness`; **both** quote providers are covered by a stubbed `HttpMessageHandler` pointed at
 a deliberately-unroutable host so a bypassed stub fails loudly instead of calling the real service — and,
 for Finnhub, without spending the free key's rate budget.
 
-`tests/Chat.IntegrationTests` (20) splits by what it needs. Eleven host the real `Chat.Web` with
+`tests/Chat.IntegrationTests` (29) splits by what it needs. Twenty host the real `Chat.Web` with
 `WebApplicationFactory` against a **throwaway SQL Server container** (`Testcontainers.MsSql`, the same image
 `docker-compose.dev.yml` uses), so those **need Docker**. The other nine — `StockQuoteResolutionTests`,
 which drive the bot's half of the round trip — need nothing: the bot has no database by design, so they are
-plain `[Fact]`s that run anywhere. The whole file takes 4–14 seconds. RabbitMQ is *not* needed: the bus is
+plain `[Fact]`s that run anywhere. The whole file takes 8–16 seconds. RabbitMQ is *not* needed: the bus is
 replaced by MassTransit's in-memory test harness, which keeps the real publisher adapters, the real
 response consumer and the endpoint names from `MessagingConstants`. It covers the anonymous hub connection
 being rejected, register → login → chat page, posting and reading history back in order and capped at 50,
 `/stock=aapl.us` publishing a broker request while creating **no** message row, a bot answer arriving over
-the broker and being posted as the bot, and two SignalR clients in one room seeing each other's lines.
+the broker and being posted as the bot, two SignalR clients in one room seeing each other's lines, and — for
+the multiple-rooms bonus — a post reaching only the room it was sent to, a switched connection going silent
+on the room it left, and the chat page rendering a picker with every room in it.
 
-**Without Docker the eleven container tests skip with a reason instead of failing**, so `dotnet test` still
+**Without Docker the twenty container tests skip with a reason instead of failing**, so `dotnet test` still
 exits 0 on a machine that has no daemon. `DockerEnvironment` asks Testcontainers itself whether an endpoint
 answers, and `[DockerFact]` turns that into an xUnit skip reason naming what to start — an environmental
 gap must not read as a broken build. The same switch is available deliberately:
@@ -332,7 +339,7 @@ gap must not read as a broken build. The same switch is available deliberately:
 CHAT_TESTS_SKIP_DOCKER=1 dotnet test    # PowerShell: $env:CHAT_TESTS_SKIP_DOCKER='1'
 ```
 
-Measured with it set: 595 unit passed, then 9 passed / 11 skipped / 0 failed, exit code 0.
+Measured with it set: 632 unit passed, then 9 passed / 20 skipped / 0 failed, exit code 0.
 
 Other gates:
 
@@ -611,7 +618,7 @@ session, maps `N/D` to "symbol not found", and `StockQuoteAnswer.Quoted` produce
 | --- | --- |
 | .NET Identity authentication | **Done** |
 | Bot handles unknown commands and exceptions gracefully | **Done** |
-| Multiple chatrooms | **Not done** |
+| Multiple chatrooms | **Done** |
 | Installer | **Not done** |
 
 **.NET Identity authentication — done.** ASP.NET Core Identity over the same `ChatDbContext`, with
@@ -643,11 +650,35 @@ with 401 and `GET /Chat` redirects to the login page.
   malformed-payload dead-lettering and broker-restart recovery. The behaviour above is implemented and the
   retry/dead-letter numbers are measured, but those two extra tests are not written.
 
-**Multiple chatrooms — not done** (bonus 2.2). The groundwork is in place and was built that way on
-purpose: `ChatRoom` is a real aggregate with a unique room name, `Messages` are keyed by `ChatRoomId`,
-`IChatNotifier` takes a `ChatRoomId` on every member and broadcasts to a per-room SignalR group, and
-`Features/Rooms/` already holds `GetDefaultRoom`. What is missing is the create/list/switch use cases and
-the UI to drive them; today the chat page always opens the seeded `General` room.
+**Multiple chatrooms — done** (bonus 2.2). The chat page renders a **Room** picker and a **New room** box:
+pick another room to switch, or type a name to create one and land in it. Each room keeps its own history,
+its own live posts and its own bot answers.
+
+Most of it was already load-bearing before the feature existed, which is why it needed no schema change and
+no migration: `ChatRoom` is a real aggregate with a database-unique name, `Messages` are keyed by
+`ChatRoomId`, and `IChatNotifier` takes a `ChatRoomId` on every member and broadcasts to a per-room SignalR
+group. What the bonus added is `Features/Rooms/CreateRoom` and `Features/Rooms/ListRooms`, two hub methods,
+and the picker.
+
+Three decisions worth naming, because each is a way this feature usually goes wrong:
+
+- **Switching leaves the old SignalR group, and the server decides when.** The room a connection is in is
+  kept in `HubCallerContext.Items` — one `Guid`, freed with the connection — so `JoinRoom` unsubscribes from
+  the previous room itself. Asking the client to send a "leave" would work only for as long as the client
+  is correct; forget it once and two rooms bleed into one window. Two integration tests assert the silence:
+  after switching, the previous room's posts stop arriving.
+- **A new room is announced to everyone, and that is a separate port.** `IChatNotifier` documents that it
+  has no broadcast-to-everyone member, because a room's *traffic* must never reach connections that did not
+  join it. The directory is not traffic — it is a name and an id every signed-in participant may see — so it
+  travels over `IChatRoomNotifier` instead of weakening that guarantee. It is the one `Clients.All` in the
+  application, and it fires when somebody creates a room, not when anybody types.
+- **A duplicate name is an answer, not an exception.** The check runs on the *normalised* name, so
+  `"  General  "` is caught by the lookup rather than by the unique index. One narrow race is accepted and
+  documented in `CreateRoomHandler`: two participants submitting the same new name in the same instant can
+  both pass the check, and the database — not the handler — rejects the loser.
+
+The landing room is still resolved by name (`GetDefaultRoom`), deliberately: rooms are ordered by name, so
+"the first room in the list" would have made a new room called `Alerts` everybody's landing room.
 
 **Installer — not done** (bonus 2.5).
 
@@ -657,7 +688,7 @@ the UI to drive them; today the chat page always opens the seeded `General` room
 
 **The integration suite used to stall, and no longer does.** The symptom was that the tests reading the
 message bus hung until their backstop, reporting `Test execution timed out` or `SendMessage did not answer
-within 30 seconds`. It is fixed; the suite now runs 20/20 in 4–14 seconds, and the cause is worth recording
+within 30 seconds`. It is fixed; the suite now runs 29/29 in 8–16 seconds, and the cause is worth recording
 because the trap is easy to walk into with MassTransit's test harness.
 
 `harness.Published` is a **live list, not a snapshot**. Enumerating it blocks in `Monitor.Wait` until the

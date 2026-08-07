@@ -18,7 +18,7 @@ Hard constraints:
 - Watch resource consumption (connections, queries, broadcasts).
 
 Bonus (track status honestly — reported in delivery email):
-- [ ] Multiple chatrooms
+- [x] Multiple chatrooms
 - [x] .NET Identity authentication
 - [x] Bot handles unknown commands/exceptions gracefully
 - [ ] Installer
@@ -32,14 +32,14 @@ Clean Architecture + DDD + CQRS-style command handlers. Two runnable processes: 
 ```
 src/
   Chat.Domain/          # Result/Error kernel; Message + ChatRoom aggregates and their VOs; ChatCommandParser. Zero deps.
-  Chat.Application/     # Abstractions/ (8 ports), Behaviors/, Contracts/ (MessageDto, wire records). Features/ from 1.8.
+  Chat.Application/     # Abstractions/ (9 ports), Behaviors/, Contracts/ (MessageDto, wire records), Features/.
   Chat.Infrastructure/  # ChatDbContext (EF Core + Identity), converters/configurations/migrations/repositories, MassTransit wiring, health checks, clock.
   Chat.Web/             # Composition root, Razor Pages, health endpoints. Identity UI from 1.11, SignalR hub from 1.12.
   Chat.Bot/             # Request consumer + quote worker + /health. No persistence, ever.
 tests/
-  Chat.UnitTests/       # 595 tests: domain, port shape, EF model and the generated read SQL, handlers,
+  Chat.UnitTests/       # 632 tests: domain, port shape, EF model and the generated read SQL, handlers,
                         #   both quote adapters, DI composition, health checks.
-  Chat.IntegrationTests/  # 20 tests: 11 need Docker (SQL Server via Testcontainers), 9 do not.
+  Chat.IntegrationTests/  # 29 tests: 20 need Docker (SQL Server via Testcontainers), 9 do not.
 ```
 
 Dependency rule: Web/Bot → Infrastructure → Application → Domain. Never the other way. `AbstractionsTests` asserts the compiled `Chat.Application` assembly references no EF Core, MassTransit, ASP.NET Core or RabbitMQ.Client.
@@ -74,7 +74,7 @@ dotnet tool restore                           # once — pins dotnet-ef 10.0.10 
 docker compose -f docker-compose.dev.yml up -d   # SQL Server 2022 + RabbitMQ 4 (UI: http://localhost:15672)
 docker compose -f docker-compose.dev.yml ps      # wait for both to report (healthy)
 dotnet build                                  # 0 warnings expected (TreatWarningsAsErrors)
-dotnet test                                   # 595 unit (hermetic) + 20 integration (11 of those need Docker)
+dotnet test                                   # 632 unit (hermetic) + 29 integration (20 of those need Docker)
 dotnet format                                 # before committing
 dotnet format --verify-no-changes             # CI-style gate
 
@@ -136,7 +136,8 @@ Agents: `architect`, `implementer`, `test-engineer`, `code-reviewer`, `docs-main
 - [x] Phase 0 (0.1–0.9): solution, build/package governance, compose stack, health checks, MassTransit.
 - [x] Phase 1 domain + persistence (1.1–1.7): message/room value objects, `ChatCommandParser`, `Message` and `ChatRoom` aggregates, the eight Application ports, EF Core + Identity model and the applied `InitialCreate` migration.
 - [x] Phase 1 mandatory (1.8–1.17): handlers, MassTransit publishers/endpoints, Identity + auth, hub, chat page with help panel, quote providers, bot worker, response consumer, integration suite. The full `/stock=` round trip works end to end.
-- [ ] 1.18 recorded manual walkthrough; bonuses 2.2 (multiple rooms), 2.4 (rate limit), 2.5 (installer).
+- [x] Bonus 2.2 multiple chatrooms: `CreateRoom` + `ListRooms` use cases, room picker and create box on the chat page, per-room isolation asserted end to end. No schema change or migration — `ChatRoom` and `ChatRoomId` were already load-bearing.
+- [ ] 1.18 recorded manual walkthrough; bonuses 2.4 (rate limit), 2.5 (installer).
 - [ ] Bonus features (see checklist above). Identity authentication and its UI landed in 1.11, so that bonus **is** claimable; multiple rooms, rate limiting and the installer are not.
 - [x] README written and verified (task 3.1) — graded deliverable, keep it in step with every change.
 - [ ] Final review + delivery zip/repo (include `.git/`).
@@ -146,6 +147,10 @@ Agents: `architect`, `implementer`, `test-engineer`, `code-reviewer`, `docs-main
 - **Two quote providers sit behind `IStockQuoteProvider`, chosen by `Stocks:Provider`**: `Finnhub` (**default**, needs `Finnhub:ApiKey` for a real price) and `Stooq`. Without a key the bot answers a friendly failure and logs the gap — nothing else breaks. Stooq's CSV endpoint is unreachable from a server — `/q/l/` is 404 and `/q/d/l/` serves a JavaScript proof-of-work browser check (429 on an unsolved `/__verify`). **Do not implement a solver for it**; that is circumventing an access control, and Finnhub exists because it is an API built for programmatic access. Verified live: `AAPL.US quote is $311.51 per share`.
 - Unknown symbol is a **friendly answer with no banner** (`SymbolNotFound`), and only a service failure raises the red banner (`LookupFailed`). Stooq signals it with `N/D` in a CSV row; Finnhub with HTTP 200 and every number zero. `Access denied` from Stooq is **not** an unknown symbol — measured returning identically for a valid ticker — so it is a refusal. Never build the Stooq URL from raw input: `StockCode.Create` already normalises to lower case and enforces `^[a-z0-9.\-]{1,20}$` (anchored `\A`/`\z`, because in .NET `$` also matches before a trailing newline).
 - Reviewers will open 2 browsers with 2 users: broadcast via SignalR groups per room, identity from claims (never from client payload).
+- **Switching rooms is the server's job.** `ChatHub.JoinRoom` leaves the previous room's group using the room id it keeps in `HubCallerContext.Items` (one `Guid`, freed with the connection). Read it with `TryGetValue`, never the indexer — a dictionary throws on a missing key, and it is missing on every connection's first join. A client-sent "leave" would break the moment a client forgot to send one.
+- **`Clients.All` is used exactly once**, in `SignalRChatRoomNotifier`, for the room directory. `IChatNotifier` documents that it has no broadcast-to-everyone member because a room's *traffic* must not leak; the directory is a name and an id, so it lives on the separate `IChatRoomNotifier` port instead of weakening that. Do not add room content to it.
+- Room creation checks for a duplicate on the **normalised** `RoomName`, so the lookup — not the unique index — reports `ChatRoom.NameTaken`. The simultaneous-submission race is accepted and documented in `CreateRoomHandler`; do not "fix" it by catching `DbUpdateException` in Application.
+- The chat page's landing room comes from `GetDefaultRoom` (by name), never from the first entry of `ListRooms`: rooms are ordered by name, so "first" would move as rooms are created.
 - `Messages` deliberately has **no foreign key at all**. The bot's author id `system:bot` is not an Identity user, so an FK to `AspNetUsers` would reject every quote answer the challenge requires; `ChatRoomId` is validated with `ExistsAsync` instead.
 - EF Core cannot translate member access on a value-converted type (`message.Content.Value`), so the "last 50" query projects raw columns into `MessageRepository.LatestMessageRow` and one in-memory loop reverses and unwraps them. Do not "simplify" it back into a `MessageDto` projection.
 - `TreatWarningsAsErrors` + `EnforceCodeStyleInBuild` are on: unused usings and style violations fail the build (`GenerateDocumentationFile=true` makes IDE0005 fire; `CS1591` is suppressed). The test projects already declare `Xunit` and `FluentAssertions` as global usings, so adding those `using` lines to a test file fails with IDE0005.
@@ -153,7 +158,7 @@ Agents: `architect`, `implementer`, `test-engineer`, `code-reviewer`, `docs-main
 - `dotnet build` can report 0 warnings while `dotnet format --verify-no-changes` still fails on whitespace and layout (measured). Run `dotnet format` before every commit, not just the build.
 - `MSSQL_SA_PASSWORD` is baked into the SQL Server volume on first start; changing it in `.env` later needs `docker compose -f docker-compose.dev.yml down -v`, and it must satisfy SQL Server's complexity policy or the container exits at boot. First start takes ~30 s; the compose healthcheck covers it and `AddPersistence` uses `EnableRetryOnFailure` so `dotnet run` does not race the container.
 - Connection strings must carry `TrustServerCertificate=True` locally — the container uses a self-signed certificate and Microsoft.Data.SqlClient 4+ encrypts by default.
-- Without Docker, 11 integration tests skip and 9 still run; exit code is 0 either way (`CHAT_TESTS_SKIP_DOCKER=1` forces the skip).
+- Without Docker, 20 integration tests skip and 9 still run; exit code is 0 either way (`CHAT_TESTS_SKIP_DOCKER=1` forces the skip).
 - The Finnhub API key is sent as the `X-Finnhub-Token` **header**, so `Finnhub:QuotePath` has only a `{0}` for the symbol and **no** `{1}`. A stale `&token={1}` now fails at startup: `StockQuoteOptionsValidation` formats the template to prove the stock code is its only argument, because otherwise `FormatException` would surface as "the quote service failed" on every lookup.
 - `Chat.Bot` must never call `AddPersistence()` — that is the structural guarantee it stays decoupled from the database. It is a `Microsoft.NET.Sdk.Web` host purely so it can serve `/health`; it exposes no chat surface. **That guarantee is now asserted**: its registrations live in `Chat.Bot/BotServiceCollectionExtensions.AddBotServices`, and `BotCompositionTests` fails if any descriptor's service or implementation type comes from EF Core, SqlClient, Identity or either `Persistence` namespace. `Program.cs` is a top-level statement file no test can call, which is why the registrations had to move out of it.
 - Both quote providers' options are `ValidateDataAnnotations().ValidateOnStart()`. Data annotations alone are not enough: `UriTypeConverter` binds *any* string, so `Finnhub:BaseAddress=not a uri` becomes a valid **relative** `Uri` that satisfies `[Required]` and only throws later inside `Consume`. `StockQuoteOptionsValidation` adds the absolute-URL and `{0}`-placeholder checks. A missing `Finnhub:ApiKey` is deliberately **not** a validation failure — keyless is a supported degraded mode.

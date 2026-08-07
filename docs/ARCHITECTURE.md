@@ -157,7 +157,8 @@ Other Application abstractions:
 | `IStockQuoteRequester` | Infrastructure (RabbitMQ publisher) | Web -> broker |
 | `IStockQuoteResponder` | Infrastructure (RabbitMQ publisher) | Bot -> broker |
 | `IStockQuoteProvider` | Infrastructure (Finnhub **or** Stooq typed client, by `Stocks:Provider`) | Bot -> quote service |
-| `IChatNotifier` | **Chat.Web** (SignalR adapter) | broadcast to a room group |
+| `IChatNotifier` | **Chat.Web** (SignalR adapter) | broadcast to a room group; no member can reach every connection |
+| `IChatRoomNotifier` | **Chat.Web** (SignalR adapter) | the room *directory* to every connection — a name and an id, never a room's traffic |
 | `IDateTimeProvider` | Infrastructure | testable clock |
 
 `IChatNotifier` is implemented in `Chat.Web`, not Infrastructure, because SignalR's `IHubContext` is an
@@ -178,6 +179,8 @@ interface.
 | `Features/StockCommands/RequestStockQuote` | `RequestStockQuoteCommand(ChatRoomId, StockCode, RequestedByUserId, RequestedByDisplayName)` | `Result` | Publishes to RabbitMQ. **No repository dependency at all** |
 | `Features/StockCommands/ResolveStockQuote` | `ResolveStockQuoteCommand(RequestId, ChatRoomId, StockCode, RequestedByUserId)` | `Result` | Runs **inside Chat.Bot**: quote lookup + format + publish response |
 | `Features/Rooms/GetDefaultRoom` | `GetDefaultRoomQuery()` | `Result<ChatRoomDto>` | The seeded `General` room the chat page opens on |
+| `Features/Rooms/ListRooms` | `ListRoomsQuery()` | `Result<IReadOnlyList<ChatRoomDto>>` | The room picker's contents, ordered by name in SQL |
+| `Features/Rooms/CreateRoom` | `CreateRoomCommand(Name)` | `Result<ChatRoomDto>` | Rejects a duplicate normalised name; announces the room after committing |
 
 `PostMessageOutcome` is an enum (`Posted` / `QuoteRequested`), not a response DTO. The broadcast has
 already happened by the time the hub sees the result, so returning the created post would invite a hub to
@@ -188,7 +191,9 @@ single-feature failures stay nested on their request type.
 `AuthorUserId` / `AuthorDisplayName` are always filled by the hub from `Context.User` claims. The client
 payload contains only the room id and the raw text. See §7.
 
-Multiple chatrooms (bonus 2.2) would add `CreateRoom` and `ListRooms` here; neither exists yet.
+`CreateRoom` is the only use case that both writes and broadcasts to everyone. It needed no schema change:
+`ChatRoom` was already an aggregate with a database-unique name and `Messages` were already keyed by
+`ChatRoomId`, so the multiple-rooms bonus is two use cases and a picker rather than a migration.
 
 ### 3.2 Pipeline
 
@@ -501,11 +506,24 @@ way to build a message or a room.
   `string userId = Context.UserIdentifier!;` and the display name from a claim. The client payload carries
   only `roomId` and `text`. A client cannot impersonate another participant or the bot.
 - SignalR **groups per room**: `Groups.AddToGroupAsync(Context.ConnectionId, GroupFor(roomId))` on join,
-  `Clients.Group(GroupFor(roomId)).ReceiveMessage(dto)` on broadcast. Never `Clients.All` — required for
-  the multiple-rooms bonus and for not spamming uninvolved connections.
+  `Clients.Group(GroupFor(roomId)).ReceiveMessage(dto)` on broadcast. No chat content ever goes to
+  `Clients.All` — that is what keeps rooms apart and what keeps uninvolved connections quiet.
+- **Switching rooms unsubscribes from the previous one, decided server-side.** `JoinRoom` removes the
+  connection from the group it was in, using the room id kept in `HubCallerContext.Items` — one `Guid` per
+  connection, freed by SignalR when the connection ends. A client-sent "leave" would be correct only while
+  the client is, and one missed call would merge two rooms in that window. Re-joining the same room (the
+  reconnect path) deliberately leaves the membership alone.
+- **One exception to "never `Clients.All`", and it is a different port.** A newly created room is announced
+  to every connection through `IChatRoomNotifier` so open windows can offer it without a reload. That is the
+  room *directory* — a name and an id every signed-in participant may see, since the list is what they pick
+  from — not a room's traffic, which is why it does not live on `IChatNotifier`. It fires when somebody
+  creates a room, not when anybody types.
 - Hub methods stay ~5 lines: read claims, send the MediatR request, map the `Result`.
 - Message text is rendered with `textContent` in the browser, never `innerHTML` — XSS is closed at output.
-- A per-user posting throttle guards against flooding (security **and** resource concern).
+  Room names are rendered by Razor (which encodes) or with `textContent`, never spliced into markup or into
+  a query selector.
+- A per-user posting throttle guards against flooding (security **and** resource concern) — **not
+  implemented**; bonus 2.4.
 
 ---
 
@@ -648,7 +666,7 @@ src/Chat.Application/
   Abstractions/Hosting/        IWebFeature, IBotFeature (scope each host's handler scan)
   Abstractions/Messaging/      ICommand, ICommandHandler, IQuery, IQueryHandler
   Abstractions/Persistence/    IChatRoomRepository, IMessageRepository, IUnitOfWork
-  Abstractions/Realtime/       IChatNotifier
+  Abstractions/Realtime/       IChatNotifier (room traffic), IChatRoomNotifier (room directory)
   Abstractions/Stocks/         IStockQuoteProvider, IStockQuoteRequester, IStockQuoteResponder,
                                StockQuoteLookup
   Abstractions/Time/           IDateTimeProvider
@@ -674,8 +692,9 @@ src/Chat.Infrastructure/
   Time/                        SystemDateTimeProvider
   DependencyInjection.cs       AddPersistence(), AddMessaging(), AddStockQuotes(), AddSystemClock()
 
-src/Chat.Web/                  Program.cs, Hubs/ChatHub.cs, Realtime/SignalRChatNotifier.cs,
-                               Messaging/StockQuoteResponseConsumer.cs, Pages/, Areas/Identity/
+src/Chat.Web/                  Program.cs, Hubs/ChatHub.cs, Realtime/SignalRChatNotifier.cs +
+                               SignalRChatRoomNotifier.cs, Messaging/StockQuoteResponseConsumer.cs,
+                               Pages/, Areas/Identity/, wwwroot/js/chat.js
 src/Chat.Bot/                  Program.cs, BotServiceCollectionExtensions.cs (asserted composition),
                                StockQuoteRequestConsumer.cs
 
