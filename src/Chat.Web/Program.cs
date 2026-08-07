@@ -26,7 +26,16 @@ builder.Services.AddMessaging(
     configurator => configurator.AddStockQuoteResponseConsumer<StockQuoteResponseConsumer>());
 
 // Registration, login and logout come from Identity's default UI over the same ChatDbContext.
-builder.Services.AddChatIdentity(requireSecureCookie: !builder.Environment.IsDevelopment());
+//
+// The cookie is Secure everywhere but Development, and that default is deliberately not relaxed by
+// deploying: it is only overridable by saying so. The switch exists because a container published on a
+// plain HTTP port is a real deployment — and there the failure is silent, not loud. The browser simply
+// never returns a Secure cookie over http, so every login appears to do nothing at all. Set
+// Security__RequireSecureCookie=false only when the host is genuinely served without TLS.
+builder.Services.AddChatIdentity(
+    requireSecureCookie: builder.Configuration.GetValue(
+        "Security:RequireSecureCookie",
+        !builder.Environment.IsDevelopment()));
 
 // The realtime adapter lives here because IHubContext belongs to the host that owns the hub.
 builder.Services.AddSignalR();

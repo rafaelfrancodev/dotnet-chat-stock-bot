@@ -1,0 +1,170 @@
+# Production stack for Coolify: the two application processes plus the infrastructure they need.
+#
+# This is NOT the file to use while developing — docker-compose.dev.yml starts SQL Server and RabbitMQ
+# only, and you run the hosts from the SDK. This one builds and runs everything.
+#
+#   docker compose up -d --build      # same thing Coolify does on a deploy
+#   docker compose ps                 # every service should reach (healthy)
+#
+# Environment variables Coolify must supply (Settings -> Environment Variables):
+#
+#   MSSQL_SA_PASSWORD   required   >= 8 chars with upper, lower, digit and symbol, or SQL Server exits
+#                                  at boot. Baked into the volume on first start: changing it later
+#                                  needs the sqlserver-data volume removed.
+#   RABBITMQ_USER       required   broker login shared by both hosts
+#   RABBITMQ_PASSWORD   required
+#   FINNHUB_API_KEY     optional   free key from finnhub.io. Without it the bot still runs and answers
+#                                  a friendly failure — see README, "Quote providers".
+#   STOCKS_PROVIDER     optional   Finnhub (default) or Stooq
+#
+# The three required ones use ${VAR:?...}, so a missing value fails the deploy with the variable's
+# name instead of starting a container that cannot connect.
+#
+# Host ports, all optional and all overridable:
+#
+#   CHAT_WEB_PORT                    3100   the chat itself
+#   CHAT_BOT_PORT                    3101   the bot's /health
+#   SQLSERVER_HOST_PORT              3102   loopback only
+#   RABBITMQ_MANAGEMENT_HOST_PORT    3103   loopback only
+#
+# The two infrastructure ones are named differently from docker-compose.dev.yml's MSSQL_PORT and
+# RABBITMQ_MANAGEMENT_PORT deliberately: a developer's .env sets those to 1433 and 15672, and sharing
+# the names would make this file silently try to bind the ports the dev stack is already using.
+#
+# Host RAM: SQL Server 2022 wants ~2 GB before it will start. On a small VPS this stack is the
+# constraint, not the two .NET processes.
+
+# Distinct from docker-compose.dev.yml's project ("chat-stock-bot") on purpose: the two files declare
+# services with the same names, so sharing a project would make one adopt the other's containers and
+# volumes. No service here sets container_name either — Coolify assigns its own, and a fixed name is
+# what stops a service from ever being scaled or run beside a second deployment.
+name: chat-stock-bot-prod
+
+services:
+  # ── Application ─────────────────────────────────────────────────────────────────────────────────
+  chat-web:
+    build:
+      context: .
+      dockerfile: src/Chat.Web/Dockerfile
+    restart: unless-stopped
+    ports:
+      # Published so Coolify's proxy (or a domain pointed at this port) can reach it.
+      - "${CHAT_WEB_PORT:-3100}:8080"
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+
+      # Behind Coolify the container speaks plain HTTP and the proxy terminates TLS. Without this the
+      # app sees scheme "http" and would refuse to send the Identity cookie, which is marked Secure in
+      # production — so nobody could stay logged in. It also stops UseHttpsRedirection from looping.
+      ASPNETCORE_FORWARDEDHEADERS_ENABLED: "true"
+
+      # READ THIS BEFORE BROWSING BY IP AND PORT. The Identity cookie is Secure outside Development, so
+      # a browser will not send it back over plain http — and the symptom is not an error, it is a login
+      # page that silently returns you to the login page. Reaching the app through a Coolify domain with
+      # TLS is the supported path and needs no change here. If you deliberately serve it over plain HTTP
+      # (http://<vps>:3100), set REQUIRE_SECURE_COOKIE=false and understand that the session cookie then
+      # travels in the clear.
+      Security__RequireSecureCookie: "${REQUIRE_SECURE_COOKIE:-true}"
+
+      # Service name, not 127.0.0.1: inside the compose network that is the database's address. The
+      # container's certificate is self-signed, hence TrustServerCertificate.
+      ConnectionStrings__ChatDatabase: "Server=sqlserver,1433;Database=ChatDb;User Id=sa;Password=${MSSQL_SA_PASSWORD:?set MSSQL_SA_PASSWORD};Encrypt=True;TrustServerCertificate=True"
+      RabbitMq__HostName: rabbitmq
+      RabbitMq__UserName: ${RABBITMQ_USER:?set RABBITMQ_USER}
+      RabbitMq__Password: ${RABBITMQ_PASSWORD:?set RABBITMQ_PASSWORD}
+    volumes:
+      # Keeps authentication cookies and antiforgery tokens valid across a redeploy.
+      - chat-web-keys:/home/app/.aspnet/DataProtection-Keys
+    depends_on:
+      sqlserver:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      # /health/live deliberately, not /health/ready: liveness runs no dependency probe, so a database
+      # or broker blip cannot get a perfectly healthy process restarted underneath its own retry logic.
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/health/live"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
+  chat-bot:
+    build:
+      context: .
+      dockerfile: src/Chat.Bot/Dockerfile
+    restart: unless-stopped
+    ports:
+      # Health only. The bot exposes no chat surface — it is reachable from the browser purely so the
+      # decoupling is inspectable: GET :3101/health names the quote provider it is configured for.
+      - "${CHAT_BOT_PORT:-3101}:8080"
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      RabbitMq__HostName: rabbitmq
+      RabbitMq__UserName: ${RABBITMQ_USER:?set RABBITMQ_USER}
+      RabbitMq__Password: ${RABBITMQ_PASSWORD:?set RABBITMQ_PASSWORD}
+      Stocks__Provider: ${STOCKS_PROVIDER:-Finnhub}
+      Finnhub__ApiKey: ${FINNHUB_API_KEY:-}
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/health/live"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ── Infrastructure ──────────────────────────────────────────────────────────────────────────────
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    restart: unless-stopped
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_PID: Developer
+      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD:?set MSSQL_SA_PASSWORD}
+    ports:
+      # Two deliberate choices. The port is off 1433 because this VPS already runs another SQL Server,
+      # and it binds to 127.0.0.1 so the database is not on the public internet — reach it through an
+      # SSH tunnel when you need SSMS. chat-web does not use this mapping at all; it goes over the
+      # compose network.
+      - "127.0.0.1:${SQLSERVER_HOST_PORT:-3102}:1433"
+    volumes:
+      - sqlserver-data:/var/opt/mssql
+    healthcheck:
+      # sqlcmd 18 requires -C (trust the container's self-signed certificate).
+      test:
+        [
+          "CMD-SHELL",
+          '/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P "$${MSSQL_SA_PASSWORD}" -C -Q "SELECT 1" -b -o /dev/null',
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
+
+  rabbitmq:
+    image: rabbitmq:4-management-alpine
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:?set RABBITMQ_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:?set RABBITMQ_PASSWORD}
+      RABBITMQ_DEFAULT_VHOST: ${RABBITMQ_VHOST:-/}
+    ports:
+      # AMQP (5672) is deliberately not published: only the two application containers speak it, and
+      # they do that over the compose network. The management UI is published on loopback only, so it
+      # is available through an SSH tunnel without putting a broker console on the internet.
+      - "127.0.0.1:${RABBITMQ_MANAGEMENT_HOST_PORT:-3103}:15672"
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_running"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+volumes:
+  sqlserver-data:
+  rabbitmq-data:
+  chat-web-keys:

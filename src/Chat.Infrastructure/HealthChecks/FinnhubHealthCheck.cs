@@ -32,7 +32,8 @@ internal sealed class FinnhubHealthCheck(HttpClient httpClient, IOptions<Finnhub
             return HealthCheckResult.Degraded(
                 "Finnhub is the configured quote provider, but Finnhub:ApiKey is not set, so every lookup "
                 + "answers with a friendly failure instead of a price. Set it with \"dotnet user-secrets "
-                + "set \"Finnhub:ApiKey\" \"<key>\" --project src/Chat.Bot\". See README -> Configuration.");
+                + "set \"Finnhub:ApiKey\" \"<key>\" --project src/Chat.Bot\" when running from the SDK, or "
+                + "the Finnhub__ApiKey environment variable in a container. See README -> Configuration.");
         }
 
         try
