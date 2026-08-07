@@ -22,7 +22,7 @@ which is why the second one exists and is now the default — see
 | Post owner is the bot | `Message.PostByBot` — takes no author, uses `MessageAuthor.Bot` |
 | Ordered by timestamp, last 50 only | `MessageRepository.GetLatestAsync`, capped in `GetLatestMessagesValidator` |
 | The stock command is never persisted | Enforced structurally in four layers — see [Design decisions](#design-decisions) |
-| Unit tests | 590 tests in `tests/Chat.UnitTests`, plus 19 in `tests/Chat.IntegrationTests` |
+| Unit tests | 595 tests in `tests/Chat.UnitTests`, plus 20 in `tests/Chat.IntegrationTests` |
 
 ---
 
@@ -303,18 +303,18 @@ consuming requests and answering politely — still works.
 dotnet test
 ```
 
-**609 tests, all passing** — 590 unit tests and 19 integration tests.
+**615 tests, all passing** — 595 unit tests and 20 integration tests.
 
-`tests/Chat.UnitTests` (590) is **hermetic**: no containers, no broker, no network access, about four
+`tests/Chat.UnitTests` (595) is **hermetic**: no containers, no broker, no network access, about four
 seconds. Database behaviour is covered by translating EF Core queries offline (`ToQueryString()`) and by
 SQLite in process memory where a real unique index is needed; messaging is covered by MassTransit's
 in-memory `ITestHarness`; **both** quote providers are covered by a stubbed `HttpMessageHandler` pointed at
 a deliberately-unroutable host so a bypassed stub fails loudly instead of calling the real service — and,
 for Finnhub, without spending the free key's rate budget.
 
-`tests/Chat.IntegrationTests` (19) splits by what it needs. Eleven host the real `Chat.Web` with
+`tests/Chat.IntegrationTests` (20) splits by what it needs. Eleven host the real `Chat.Web` with
 `WebApplicationFactory` against a **throwaway SQL Server container** (`Testcontainers.MsSql`, the same image
-`docker-compose.dev.yml` uses), so those **need Docker**. The other eight — `StockQuoteResolutionTests`,
+`docker-compose.dev.yml` uses), so those **need Docker**. The other nine — `StockQuoteResolutionTests`,
 which drive the bot's half of the round trip — need nothing: the bot has no database by design, so they are
 plain `[Fact]`s that run anywhere. The whole file takes 4–14 seconds. RabbitMQ is *not* needed: the bus is
 replaced by MassTransit's in-memory test harness, which keeps the real publisher adapters, the real
@@ -332,7 +332,7 @@ gap must not read as a broken build. The same switch is available deliberately:
 CHAT_TESTS_SKIP_DOCKER=1 dotnet test    # PowerShell: $env:CHAT_TESTS_SKIP_DOCKER='1'
 ```
 
-Measured with it set: 590 unit passed, then 8 passed / 11 skipped / 0 failed, exit code 0.
+Measured with it set: 595 unit passed, then 9 passed / 11 skipped / 0 failed, exit code 0.
 
 Other gates:
 
@@ -458,7 +458,7 @@ changes, and neither the domain, the messaging, the hub nor the UI knows the dif
 
 | `Stocks:Provider` | Implementation | Endpoint | Needs a key |
 | --- | --- | --- | --- |
-| `Finnhub` *(default)* | `FinnhubClient` + `FinnhubQuoteParser` | `https://finnhub.io/api/v1/quote` — JSON | **yes** |
+| `Finnhub` *(default)* | `FinnhubClient` + `FinnhubQuoteParser` | `https://finnhub.io/api/v1/quote?symbol={code}` — JSON, key in a header | **yes** |
 | `Stooq` | `StooqClient` + `StooqCsvParser` | `https://stooq.com/q/d/l/?s={code}&i=d` — CSV | no |
 
 **Finnhub is the default because it is the one that returns a price.** It needs one free key from
@@ -469,6 +469,13 @@ dotnet user-secrets set "Finnhub:ApiKey" "<your-api-key>" --project src/Chat.Bot
 ```
 
 Only `Chat.Bot` needs it — it is the only process that calls a quote service.
+
+**The key is sent as the `X-Finnhub-Token` header, never in the query string.** Finnhub accepts both. A
+credential in a URL is a credential in every application log, proxy access log and error report that URL
+passes through; `IHttpClientFactory` does redact query values in its own request log, but that protection
+depends on the `System.Net.Http.DisableUriRedaction` switch staying off and on nobody turning on extended
+HTTP logging. A header needs no such assumption. Two tests pin it — one unit, one integration — asserting
+the header carries the key and the URL does not contain it.
 
 **Without a key** nothing breaks: the bot logs
 `Finnhub:ApiKey is not configured, so no quote can be requested`, answers the room with
@@ -650,7 +657,7 @@ the UI to drive them; today the chat page always opens the seeded `General` room
 
 **The integration suite used to stall, and no longer does.** The symptom was that the tests reading the
 message bus hung until their backstop, reporting `Test execution timed out` or `SendMessage did not answer
-within 30 seconds`. It is fixed; the suite now runs 19/19 in 4–14 seconds, and the cause is worth recording
+within 30 seconds`. It is fixed; the suite now runs 20/20 in 4–14 seconds, and the cause is worth recording
 because the trap is easy to walk into with MassTransit's test harness.
 
 `harness.Published` is a **live list, not a snapshot**. Enumerating it blocks in `Monitor.Wait` until the

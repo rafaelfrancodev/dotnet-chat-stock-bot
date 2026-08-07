@@ -37,9 +37,9 @@ src/
   Chat.Web/             # Composition root, Razor Pages, health endpoints. Identity UI from 1.11, SignalR hub from 1.12.
   Chat.Bot/             # Request consumer + quote worker + /health. No persistence, ever.
 tests/
-  Chat.UnitTests/       # 590 tests: domain, port shape, EF model and the generated read SQL, handlers,
+  Chat.UnitTests/       # 595 tests: domain, port shape, EF model and the generated read SQL, handlers,
                         #   both quote adapters, DI composition, health checks.
-  Chat.IntegrationTests/  # 19 tests: 11 need Docker (SQL Server via Testcontainers), 8 do not.
+  Chat.IntegrationTests/  # 20 tests: 11 need Docker (SQL Server via Testcontainers), 9 do not.
 ```
 
 Dependency rule: Web/Bot → Infrastructure → Application → Domain. Never the other way. `AbstractionsTests` asserts the compiled `Chat.Application` assembly references no EF Core, MassTransit, ASP.NET Core or RabbitMQ.Client.
@@ -74,7 +74,7 @@ dotnet tool restore                           # once — pins dotnet-ef 10.0.10 
 docker compose -f docker-compose.dev.yml up -d   # SQL Server 2022 + RabbitMQ 4 (UI: http://localhost:15672)
 docker compose -f docker-compose.dev.yml ps      # wait for both to report (healthy)
 dotnet build                                  # 0 warnings expected (TreatWarningsAsErrors)
-dotnet test                                   # 590 unit (hermetic) + 19 integration (11 of those need Docker)
+dotnet test                                   # 595 unit (hermetic) + 20 integration (11 of those need Docker)
 dotnet format                                 # before committing
 dotnet format --verify-no-changes             # CI-style gate
 
@@ -153,7 +153,8 @@ Agents: `architect`, `implementer`, `test-engineer`, `code-reviewer`, `docs-main
 - `dotnet build` can report 0 warnings while `dotnet format --verify-no-changes` still fails on whitespace and layout (measured). Run `dotnet format` before every commit, not just the build.
 - `MSSQL_SA_PASSWORD` is baked into the SQL Server volume on first start; changing it in `.env` later needs `docker compose -f docker-compose.dev.yml down -v`, and it must satisfy SQL Server's complexity policy or the container exits at boot. First start takes ~30 s; the compose healthcheck covers it and `AddPersistence` uses `EnableRetryOnFailure` so `dotnet run` does not race the container.
 - Connection strings must carry `TrustServerCertificate=True` locally — the container uses a self-signed certificate and Microsoft.Data.SqlClient 4+ encrypts by default.
-- Without Docker, 11 integration tests skip and 8 still run; exit code is 0 either way (`CHAT_TESTS_SKIP_DOCKER=1` forces the skip).
+- Without Docker, 11 integration tests skip and 9 still run; exit code is 0 either way (`CHAT_TESTS_SKIP_DOCKER=1` forces the skip).
+- The Finnhub API key is sent as the `X-Finnhub-Token` **header**, so `Finnhub:QuotePath` has only a `{0}` for the symbol and **no** `{1}`. A stale `&token={1}` now fails at startup: `StockQuoteOptionsValidation` formats the template to prove the stock code is its only argument, because otherwise `FormatException` would surface as "the quote service failed" on every lookup.
 - `Chat.Bot` must never call `AddPersistence()` — that is the structural guarantee it stays decoupled from the database. It is a `Microsoft.NET.Sdk.Web` host purely so it can serve `/health`; it exposes no chat surface. **That guarantee is now asserted**: its registrations live in `Chat.Bot/BotServiceCollectionExtensions.AddBotServices`, and `BotCompositionTests` fails if any descriptor's service or implementation type comes from EF Core, SqlClient, Identity or either `Persistence` namespace. `Program.cs` is a top-level statement file no test can call, which is why the registrations had to move out of it.
 - Both quote providers' options are `ValidateDataAnnotations().ValidateOnStart()`. Data annotations alone are not enough: `UriTypeConverter` binds *any* string, so `Finnhub:BaseAddress=not a uri` becomes a valid **relative** `Uri` that satisfies `[Required]` and only throws later inside `Consume`. `StockQuoteOptionsValidation` adds the absolute-URL and `{0}`-placeholder checks. A missing `Finnhub:ApiKey` is deliberately **not** a validation failure — keyless is a supported degraded mode.
 - Shared outbound HTTP budget lives in `Stocks/StockQuoteHttpDefaults` (attempts, retry delay, response ceiling), never on one adapter. Only `TimeoutSeconds` is per-provider, and `ConfigureQuoteResilience` is the single pipeline both registrations use.

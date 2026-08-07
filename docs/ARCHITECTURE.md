@@ -5,10 +5,14 @@ Two runnable processes, one solution, Clean Architecture + DDD tactical patterns
 | Process | Project | Responsibility |
 | --- | --- | --- |
 | Web host | `src/Chat.Web` | ASP.NET Core, Identity UI, SignalR hub, minimal Razor page, composition root |
-| Bot worker | `src/Chat.Bot` | `BackgroundService` that consumes stock-quote requests, calls Stooq, publishes answers |
+| Bot worker | `src/Chat.Bot` | MassTransit consumer of stock-quote requests; calls the configured quote provider and publishes answers. Also serves `/health` |
 
 They share nothing at runtime except **RabbitMQ**. The bot has no reference to `Chat.Web`, no database
-connection and no SignalR client — that is what "decoupled" means here.
+connection and no SignalR client — that is what "decoupled" means here, and `BotCompositionTests` fails the
+build if a persistence registration ever appears in the bot's composition.
+
+There is deliberately **no `BackgroundService`** in the bot: MassTransit's hosted bus *is* the worker. It
+owns the connection, the prefetch window and the retry policy, and pushes each message into the consumer.
 
 ---
 
@@ -24,7 +28,7 @@ Chat.Bot ─┘
 | --- | --- | --- |
 | `Chat.Domain` | Entities, aggregates, value objects, domain events, `Result`/`Error`, domain constants | Any package reference at all. The csproj is deliberately empty |
 | `Chat.Application` | Commands/Queries + handlers + validators, wire contracts, abstractions (`IMessageRepository`, `IStockQuoteRequester`, `IChatNotifier`, ...), pipeline behaviors | EF Core, ASP.NET Core, RabbitMQ client |
-| `Chat.Infrastructure` | EF Core `ChatDbContext` + configurations, Identity stores, repositories, RabbitMQ connection/publisher/consumer, Stooq typed `HttpClient` | Business rules |
+| `Chat.Infrastructure` | EF Core `ChatDbContext` + configurations, Identity stores, repositories, RabbitMQ connection/publisher/consumer, the quote provider's typed `HttpClient`, health checks | Business rules |
 | `Chat.Web` | `ChatHub`, Razor pages, `Program.cs` composition root, SignalR notifier adapter | Business rules, direct EF queries |
 | `Chat.Bot` | `Program.cs`, hosted consumer service | Business rules, EF Core, SignalR |
 
@@ -81,7 +85,8 @@ unrepresentable.
 | `MessageAuthor` | non-empty `UserId` and `DisplayName`; `MessageAuthor.Bot` is the well-known singleton |
 | `ChatRoomId` / `MessageId` | `readonly record struct` wrappers over `Guid`, `New()` factory, EF value converter |
 
-`StockCode` validating **before** the URL is built is the anti-injection control for the outbound Stooq call.
+`StockCode` validating **before** the URL is built is the anti-injection control for the outbound quote call,
+whichever provider is configured.
 
 ### 2.3 Parsing the chat input (domain service)
 
@@ -151,7 +156,7 @@ Other Application abstractions:
 | --- | --- | --- |
 | `IStockQuoteRequester` | Infrastructure (RabbitMQ publisher) | Web -> broker |
 | `IStockQuoteResponder` | Infrastructure (RabbitMQ publisher) | Bot -> broker |
-| `IStockQuoteProvider` | Infrastructure (Stooq typed client) | Bot -> Stooq |
+| `IStockQuoteProvider` | Infrastructure (Finnhub **or** Stooq typed client, by `Stocks:Provider`) | Bot -> quote service |
 | `IChatNotifier` | **Chat.Web** (SignalR adapter) | broadcast to a room group |
 | `IDateTimeProvider` | Infrastructure | testable clock |
 
@@ -171,18 +176,19 @@ interface.
 | `Features/Messages/GetLatestMessages` | `GetLatestMessagesQuery(ChatRoomId, Count = 50)` | `Result<IReadOnlyList<MessageDto>>` | |
 | `Features/Messages/PostBotMessage` | `PostBotMessageCommand(ChatRoomId, Text, RequestedByUserId, Outcome)` | `Result` | Invoked by Chat.Web's response consumer. Posts the bot's text verbatim and raises the outage alert (§5) |
 | `Features/StockCommands/RequestStockQuote` | `RequestStockQuoteCommand(ChatRoomId, StockCode, RequestedByUserId, RequestedByDisplayName)` | `Result` | Publishes to RabbitMQ. **No repository dependency at all** |
+| `Features/StockCommands/ResolveStockQuote` | `ResolveStockQuoteCommand(RequestId, ChatRoomId, StockCode, RequestedByUserId)` | `Result` | Runs **inside Chat.Bot**: quote lookup + format + publish response |
+| `Features/Rooms/GetDefaultRoom` | `GetDefaultRoomQuery()` | `Result<ChatRoomDto>` | The seeded `General` room the chat page opens on |
 
 `PostMessageOutcome` is an enum (`Posted` / `QuoteRequested`), not a response DTO. The broadcast has
 already happened by the time the hub sees the result, so returning the created post would invite a hub to
 echo it back and render the message twice; the outcome is the minimum a caller needs to know which branch
 ran. Errors shared by more than one use case live in `Chat.Application/Errors` (`ChatRoomErrors.NotFound`);
 single-feature failures stay nested on their request type.
-| `Features/StockCommands/ResolveStockQuote` | `ResolveStockQuoteCommand(StockQuoteRequested)` | `Result` | Runs **inside Chat.Bot**: Stooq lookup + format + publish response |
-| `Features/Rooms/CreateRoom` | `CreateRoomCommand(Name, CreatedByUserId)` | `Result<Guid>` | Bonus: multiple rooms |
-| `Features/Rooms/ListRooms` | `ListRoomsQuery()` | `Result<IReadOnlyList<ChatRoomSummaryDto>>` | Bonus |
 
 `AuthorUserId` / `AuthorDisplayName` are always filled by the hub from `Context.User` claims. The client
 payload contains only the room id and the raw text. See §7.
+
+Multiple chatrooms (bonus 2.2) would add `CreateRoom` and `ListRooms` here; neither exists yet.
 
 ### 3.2 Pipeline
 
@@ -273,12 +279,12 @@ transport rather than configure it.
 | Endpoint names | `stock-quote-requests`, `stock-quote-responses` (`MessagingConstants`) | Explicit and readable in the management UI rather than convention-derived |
 | Endpoint formatter | `SetKebabCaseEndpointNameFormatter()` | Any convention-named endpoint matches the ones we name by hand |
 | Prefetch | `10` (`MessagingConstants.PrefetchCount`) | Bounded in-flight work; work is I/O-bound against a third party |
-| Retry | `Interval(3, 2s)` | Rides out a brief Stooq blip; then the message moves to `_error` instead of looping. Measured in 1.10 against the real broker: 4 attempts ~2 s apart, then the message sat in `stock-quote-requests_error` and the input queue returned to empty |
+| Retry | `Interval(3, 2s)` | Rides out a brief quote-service blip; then the message moves to `_error` instead of looping. Measured against the real broker: 4 attempts ~2 s apart, then the message sat in `stock-quote-requests_error` and the input queue returned to empty |
 | Durability | MassTransit defaults: durable queues, persistent messages | Survives a broker restart mid-demo |
 | Consumer registration | Passed per host into `AddMessaging(...)` | Chat.Web registers only the response consumer, Chat.Bot only the request consumer — neither learns the other's endpoint |
 
-Transient Stooq faults are still retried **inside** the bot by the HTTP resilience handler, before the
-message-level retry ever engages. That keeps broker traffic flat.
+Transient quote-service faults are still retried **inside** the bot by the HTTP resilience handler, before
+the message-level retry ever engages. That keeps broker traffic flat.
 
 ### Scale-out note (documented, not implemented)
 
@@ -294,7 +300,7 @@ out so the reviewer knows it is a conscious decision rather than an oversight.
 ## 5. End-to-end stock flow (and where "never persist" is enforced)
 
 ```
-Browser                Chat.Web                        RabbitMQ                 Chat.Bot            Stooq
+Browser                Chat.Web                        RabbitMQ                 Chat.Bot          Finnhub
    │  SendMessage(roomId, "/stock=aapl.us")
    ├──────────────────────▶ ChatHub.SendMessage
    │                        (author from Context.User claims)
@@ -312,9 +318,9 @@ Browser                Chat.Web                        RabbitMQ                 
    │                                       ├── Publish<StockQuoteRequested> ─▶ stock-quote-requests
    │                                                                              │
    │                                                                    ResolveStockQuoteHandler
-   │                                                                              ├── GET /q/l/?s=aapl.us&f=sd2t2ohlcv&h&e=csv ──▶
-   │                                                                              │◀── Symbol,Date,Time,Open,High,Low,Close,Volume
-   │                                                                              │    AAPL.US,2026-08-03,21:00:00,...,93.42,...
+   │                                                                              ├── GET /api/v1/quote?symbol=AAPL ───────────▶
+   │                                                                              │   (key in the X-Finnhub-Token header)
+   │                                                                              │◀── {"c":93.42,"pc":93.10,...}
    │                                                                    format "AAPL.US quote is $93.42 per share"
    │                    stock-quote-responses ◀── Publish<StockQuoteResolved> ── IStockQuoteResponder
    │                        StockQuoteResponseConsumer (Chat.Web)
@@ -367,7 +373,7 @@ is the state of the system.
 twice. The only step that can duplicate a row is a failure **after** the commit, because everything before
 it leaves the store untouched — so `PostBotMessageHandler` converts a failed broadcast or alert into
 `PostBotMessageCommand.Errors.NotAnnounced` instead of letting it throw. The consumer acknowledges a failed
-`Result` (the rule set in 1.15), so the delivery is not retried: the post already exists, and connections
+`Result`, so the delivery is not retried: the post already exists, and connections
 that missed the push read it back from the room history on their next join. A duplicate row is permanent, a
 missed push is not.
 
@@ -377,14 +383,36 @@ a `RequestId` column on `Messages` with a unique index — which would put a bro
 domain aggregate whose identity has nothing to do with one, for a single-instance deliverable in which
 neither window has been observed. Recorded rather than hidden.
 
+### One port, two quote adapters
+
+`IStockQuoteProvider` has two implementations, selected by `Stocks:Provider`:
+
+| Provider | Adapter | Endpoint | Returns a price from a server? |
+| --- | --- | --- | --- |
+| `Finnhub` *(default)* | `FinnhubClient` + `FinnhubQuoteParser` | `api/v1/quote` — JSON, key in the `X-Finnhub-Token` header | **yes**, with a free key |
+| `Stooq` | `StooqClient` + `StooqCsvParser` | the CSV path the challenge names | no — see below |
+
+The challenge names Stooq's CSV endpoint, and it is implemented and still selectable. It cannot answer a
+server, though: measured, `/q/l/` returns 404 and `/q/d/l/` serves a JavaScript proof-of-work browser check.
+Solving that check is deliberately **not** implemented — it is an access control, and circumventing it is not
+something a deliverable should do. Finnhub exists here because it is an API built for programmatic access,
+which is the honest way to satisfy the requirement behind the URL. README §"Quote providers" carries the
+measurements.
+
+That both fit behind one unchanged port, with the switch being a single configuration value and no other
+code touched, is the reusability the challenge asks about. `StockQuoteProviderSelection` is the only reader
+of that value, so the registration and the health probe cannot disagree about which one is live.
+
 ### Unknown / malformed commands
 
 - `/help`, `/stock`, `/stock=` -> `UnknownCommand` / `Invalid`: nothing persisted, nothing published; the
   hub sends a private hint back to the caller only.
-- Unknown ticker (Stooq returns `N/D`) -> the bot publishes `StockQuoteOutcome.SymbolNotFound` with the
-  message `"Sorry, I could not find a quote for AAPL.XX."`.
-- Stooq unreachable / unparseable -> `StockQuoteOutcome.LookupFailed` with a friendly message. The bot
-  never crashes and never dead-letters for these — they are answers, not failures.
+- Unknown ticker -> the bot publishes `StockQuoteOutcome.SymbolNotFound` with the message
+  `"Sorry, I could not find a quote for AAPL.XX."`. Each provider signals it differently: Finnhub answers
+  HTTP 200 with every number zero, Stooq puts `N/D` in the CSV row.
+- Quote service unreachable / unparseable, or no API key configured -> `StockQuoteOutcome.LookupFailed`
+  with a friendly message, plus a private outage banner for the requester. The bot never crashes and never
+  dead-letters for these — they are answers, not failures.
 
 ---
 
@@ -486,7 +514,7 @@ way to build a message or a room.
 | Area | Control |
 | --- | --- |
 | RabbitMQ | One `IConnection` per process (singleton), one `IChannel` per publisher/consumer, prefetch 10, manual ack, DLQ instead of requeue loops |
-| HTTP | `IHttpClientFactory` typed `StooqClient` with `BaseAddress`, 10 s timeout and a standard resilience handler (retry with jittered backoff + circuit breaker). No `new HttpClient()` |
+| HTTP | `IHttpClientFactory` typed client for the configured provider: 10 s total budget split across 3 attempts, a 64 KiB response ceiling, and a standard resilience handler (retry with jittered backoff + circuit breaker). Shared numbers live in `StockQuoteHttpDefaults`. No `new HttpClient()` anywhere |
 | EF Core | `AsNoTracking()` + projection on every read, single indexed `Take(50)` query, no lazy loading, no navigation properties between aggregates (so no N+1 is even expressible) |
 | SignalR | Group-scoped broadcasts, small DTO payloads, no per-connection server state beyond group membership, cleanup in `OnDisconnectedAsync` |
 | Logging | Per-message logging at `Debug`; `Information` reserved for lifecycle events |
@@ -513,9 +541,9 @@ Both hosts expose the same three routes, mapped from one definition
 ### Why there are two broker checks
 
 `masstransit-bus` is registered automatically by `AddMassTransit`. It reports **bus lifecycle state, not
-broker reachability**. Task 0.9 measured it with no receive endpoints (it stayed `Healthy` through a 60 s
-outage, because a bus that consumes nothing never connects); task 1.10 re-measured it against Chat.Bot
-running a **real receive endpoint on `stock-quote-requests`**:
+broker reachability**. Measured first with no receive endpoints (it stayed `Healthy` through a 60 s outage,
+because a bus that consumes nothing never connects), then again against Chat.Bot running a **real receive
+endpoint on `stock-quote-requests`**:
 
 | Scenario | `masstransit-bus` | Our `rabbitmq` check | `/health/ready` with the bus check alone |
 | --- | --- | --- | --- |
@@ -525,22 +553,26 @@ running a **real receive endpoint on `stock-quote-requests`**:
 
 The third row is the outage that actually happens in production, and `Degraded` maps to HTTP 200 — the
 host would keep advertising itself as ready while no quote can flow. **`RabbitMqHealthCheck` is therefore
-kept, and the removal trigger from task 0.9 is closed.** One short-lived connection per probe is the
-price of a readiness signal that is true.
+kept**, and the question of whether it was redundant is settled. One short-lived connection per probe is
+the price of a readiness signal that is true.
 
 Design decisions:
 
 - **Liveness never probes a dependency.** If `/health/live` failed when RabbitMQ went down, an
   orchestrator would restart a perfectly healthy process and lose the broker's automatic recovery.
-- **Stooq is tagged `external` and reports `Degraded`, not `Unhealthy`**, and is excluded from
+- **The quote provider is tagged `external` and reports `Degraded`, not `Unhealthy`**, and is excluded from
   `/health/ready`. A third-party outage is not the bot's fault: the bot stays ready and answers
   "could not look that up right now", which is exactly the graceful-degradation bonus.
+- **The check is named for the role (`stock-quote-provider`), not the vendor**, and names the vendor in its
+  description. `StockQuoteProviderSelection` is the single reader of `Stocks:Provider`, so the probe and the
+  client the bot actually calls cannot diverge. With Finnhub selected and no key configured, the check
+  reports `Degraded` and names the key — the one gap nothing else in the system surfaces.
 - **The bot has no database probe**, because it has no database. That absence is the visible proof of
   the decoupling the challenge asks for.
 - **Chat.Bot is a `Microsoft.NET.Sdk.Web` host purely to serve these probes.** It maps no chat routes
   and still never references `Chat.Web`.
-- **The health probe does not fetch a real quote.** It probes the Stooq root, so monitoring cannot
-  consume the rate budget the actual feature depends on.
+- **The health probe does not fetch a real quote.** It probes the provider's service root, so monitoring
+  cannot consume the rate budget the actual feature depends on — which matters most on Finnhub's free key.
 - The JSON payload reports an exception's **message only, never its stack trace** — a stack trace would
   leak server names and file paths to anyone who can reach the endpoint.
 - A missing connection string is *reported* as unhealthy with an actionable message rather than thrown
@@ -580,25 +612,30 @@ Verified behaviour (both hosts): all dependencies up → 200; broker stopped →
 
 - Horizontal scale-out of `Chat.Web` (needs a SignalR backplane and per-instance response queues — §4).
 - Message editing/deletion, read receipts, typing indicators, attachments, presence lists.
-- Quote caching or rate-limiting towards Stooq beyond the HTTP resilience policy.
+- Quote caching or rate-limiting towards the quote provider beyond the HTTP resilience policy.
 - Distributed tracing/OpenTelemetry; structured logging to the console is enough here.
 - Saga/outbox between the DB write and the SignalR broadcast. Documented as a known at-most-once edge:
   if the process dies between commit and broadcast, connected clients see the message on their next reload.
 
 ---
 
-## 10. Repository map
+## 11. Repository map
 
 ```
 Chat.sln
+Chat.slnLaunch                 "Chat.Web + Chat.Bot" multi-project startup profile for Visual Studio
 Directory.Build.props          net10.0, nullable, implicit usings, warnings-as-errors, LangVersion latest
 Directory.Packages.props       central package management (all versions pinned here)
 global.json                    SDK 10.0.100 + rollForward latestFeature
 .editorconfig                  clean-code conventions, enforced on build
-docker-compose.yml             RabbitMQ 4 + management UI
-.env.example                   local broker credentials template (.env is git-ignored)
+.config/dotnet-tools.json      pins dotnet-ef
+docker-compose.dev.yml         SQL Server 2022 + RabbitMQ 4 with management UI
+.env.example                   local credentials template (.env is git-ignored, and read only by compose)
+README.md                      graded deliverable: setup, run, test, bonus status
 docs/ARCHITECTURE.md           this file
 docs/PLAN.md                   ordered, committable task list
+scripts/run-dev.ps1            builds and runs both hosts, waits for /health/live
+scripts/set-dev-secrets.ps1    writes both hosts' user-secrets from .env
 
 src/Chat.Domain/
   Common/                      Result, Error, Entity, AggregateRoot, IDomainEvent
@@ -608,29 +645,40 @@ src/Chat.Domain/
   StockCommands/               StockCode, ChatCommandParser, ParsedChatInput
 
 src/Chat.Application/
+  Abstractions/Hosting/        IWebFeature, IBotFeature (scope each host's handler scan)
   Abstractions/Messaging/      ICommand, ICommandHandler, IQuery, IQueryHandler
   Abstractions/Persistence/    IChatRoomRepository, IMessageRepository, IUnitOfWork
   Abstractions/Realtime/       IChatNotifier
-  Abstractions/Stocks/         IStockQuoteProvider
+  Abstractions/Stocks/         IStockQuoteProvider, IStockQuoteRequester, IStockQuoteResponder,
+                               StockQuoteLookup
   Abstractions/Time/           IDateTimeProvider
   Behaviors/                   LoggingBehavior, ValidationBehavior
   Errors/                      ChatRoomErrors (failures shared by more than one use case)
+  Contracts/Messages/          MessageDto (shared by three ports, so not in a feature folder)
   Contracts/Messaging/         MessagingConstants, StockQuoteRequested, StockQuoteResolved
+  Contracts/Realtime/          ChatAlert
+  Contracts/Rooms/             ChatRoomDto
   Features/                    Messages/, Rooms/, StockCommands/
-  DependencyInjection.cs       AddApplication()
+  DependencyInjection.cs       AddApplication<TFeature>()
 
 src/Chat.Infrastructure/
   Persistence/                 ChatDbContext, configurations, repositories, migrations
   Identity/                    ApplicationUser, Identity configuration
   Messaging/                   RabbitMqOptions, MassTransitStockQuoteRequester/Responder,
                                StockQuoteEndpointExtensions (endpoint names from MessagingConstants)
-  Stocks/                      StooqClient, StooqCsvParser, StooqOptions
-  DependencyInjection.cs       AddPersistence(), AddMessaging(), AddStockQuotes()
+  Stocks/                      FinnhubClient/Parser/Options, StooqClient/CsvParser/Options,
+                               StockQuoteProviderSelection (the only reader of Stocks:Provider),
+                               StockQuoteHttpDefaults, StockQuoteOptionsValidation
+  HealthChecks/                SqlServer, RabbitMq, Finnhub and Stooq probes, HealthCheckNames,
+                               HealthCheckBuilderExtensions, HealthCheckEndpoints, HealthReportSerializer
+  Time/                        SystemDateTimeProvider
+  DependencyInjection.cs       AddPersistence(), AddMessaging(), AddStockQuotes(), AddSystemClock()
 
 src/Chat.Web/                  Program.cs, Hubs/ChatHub.cs, Realtime/SignalRChatNotifier.cs,
                                Messaging/StockQuoteResponseConsumer.cs, Pages/, Areas/Identity/
-src/Chat.Bot/                  Program.cs, StockQuoteRequestConsumer.cs
+src/Chat.Bot/                  Program.cs, BotServiceCollectionExtensions.cs (asserted composition),
+                               StockQuoteRequestConsumer.cs
 
 tests/Chat.UnitTests/          mirrors src structure
-tests/Chat.IntegrationTests/   CustomWebApplicationFactory + flow tests
+tests/Chat.IntegrationTests/   Infrastructure/ChatApplicationFactory + ChatServerFixture + flow tests
 ```
