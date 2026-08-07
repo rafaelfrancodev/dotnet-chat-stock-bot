@@ -1,0 +1,32 @@
+# Keeps the build context small and, more importantly, keeps the *host's* build output out of it.
+# Copying a Windows-built obj/ into a Linux image poisons the restore: project.assets.json records
+# absolute host paths and the wrong RID, and `dotnet publish` then fails or silently reuses stale
+# assemblies. Everything below is either regenerated inside the image or irrelevant to it.
+
+**/bin/
+**/obj/
+**/.vs/
+**/.vscode/
+**/.idea/
+**/TestResults/
+
+.git/
+.github/
+.claude/
+
+# Local-only credentials. They must never reach an image layer — they are supplied at run time.
+.env
+.env.*
+!.env.example
+
+# Tests are not published; the CI workflow runs them.
+tests/
+
+docs/
+*.md
+!README.md
+
+docker-compose*.yml
+.dockerignore
+Chat.slnLaunch*
+*.pdf
