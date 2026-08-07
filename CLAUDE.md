@@ -84,6 +84,12 @@ dotnet run --project src/Chat.Web             # terminal 1 — http://localhost:
 dotnet run --project src/Chat.Bot             # terminal 2 — http://localhost:5299 (health only)
 ```
 
+**Deployment** — `docker-compose.yml` is the deployable stack (both apps + SQL Server + RabbitMQ), built from `src/Chat.Web/Dockerfile` and `src/Chat.Bot/Dockerfile` with the repo root as context. `docker-compose.dev.yml` stays the development file and starts infrastructure only. CI is `.github/workflows/pr-workflow.yml` (PRs and pushes to `main`); `deploy-to-dev.yml` verifies then calls a Coolify webhook.
+
+```bash
+docker compose up -d --build                  # web :3100, bot :3101, sqlserver :3102, rabbitmq UI :3103
+```
+
 **Running both hosts together** (the stock flow needs both):
 
 ```bash
@@ -164,6 +170,12 @@ Agents: `architect`, `implementer`, `test-engineer`, `code-reviewer`, `docs-main
 - Both quote providers' options are `ValidateDataAnnotations().ValidateOnStart()`. Data annotations alone are not enough: `UriTypeConverter` binds *any* string, so `Finnhub:BaseAddress=not a uri` becomes a valid **relative** `Uri` that satisfies `[Required]` and only throws later inside `Consume`. `StockQuoteOptionsValidation` adds the absolute-URL and `{0}`-placeholder checks. A missing `Finnhub:ApiKey` is deliberately **not** a validation failure — keyless is a supported degraded mode.
 - Shared outbound HTTP budget lives in `Stocks/StockQuoteHttpDefaults` (attempts, retry delay, response ceiling), never on one adapter. Only `TimeoutSeconds` is per-provider, and `ConfigureQuoteResilience` is the single pipeline both registrations use.
 - `appsettings.json` may carry real `//` comments — the JSON configuration provider parses with `JsonCommentHandling.Skip`. Do not fake them as `"// Key": "explanation"` string entries; those bind as configuration keys.
+- **Container images must be Debian-based, never `-alpine`.** The Alpine .NET images ship without ICU and set `DOTNET_SYSTEM_GLOBALIZATION_INVARIANT`, under which `Microsoft.Data.SqlClient` throws at connection time — the same reason `InvariantGlobalization` is pinned `false`.
+- **The Identity cookie is `Secure` outside Development, so a container served over plain HTTP cannot hold a session** — registration appears to work and every page then bounces to the login screen. Measured. Behind TLS it just works (`ASPNETCORE_FORWARDEDHEADERS_ENABLED=true` is set in compose); for a deliberate plain-HTTP host set `Security__RequireSecureCookie=false`.
+- `.dockerignore` excludes `bin/` and `obj/`: copying a Windows-built `obj/` into a Linux image poisons the restore with host paths and the wrong RID.
+- Compose healthchecks probe `/health/live`, never `/health/ready` — a dependency blip must not get a healthy process restarted under its own retry logic.
+- The production compose uses `SQLSERVER_HOST_PORT` / `RABBITMQ_MANAGEMENT_HOST_PORT`, deliberately *not* the dev file's `MSSQL_PORT` / `RABBITMQ_MANAGEMENT_PORT`: a developer's `.env` sets those to 1433/15672 and shared names would make the prod stack try to bind the dev stack's ports. Its project name is `chat-stock-bot-prod` for the same reason.
+- On Windows, Hyper-V reserves dynamic port ranges (measured 3058–3357), so 3100–3103 can fail locally with "socket ... forbidden by its access permissions". Not a compose fault; override the port variables to test.
 - `InvariantGlobalization` must stay `false`. `Microsoft.Data.SqlClient` throws "Globalization Invariant Mode is not supported" at connection time, so EF Core and the SQL health check both fail under it.
 - Use `127.0.0.1`, never `localhost`, in connection strings and broker host names. The compose file publishes on IPv4 loopback only, but `localhost` resolves to `::1` first on Windows — SqlClient then burns its full 15 s timeout before failing.
 - Health checks live in `Chat.Infrastructure/HealthChecks` and are mapped by `MapChatHealthChecks()`. Stooq is tagged `external` and excluded from `/health/ready` — a third-party outage must not mark the bot unready.

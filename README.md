@@ -348,6 +348,74 @@ dotnet build                       # 0 warnings (TreatWarningsAsErrors + Enforce
 dotnet format --verify-no-changes  # formatting gate
 ```
 
+### Continuous integration
+
+`.github/workflows/pr-workflow.yml` runs the same gates on every pull request and on every commit that
+lands on `main`. Two jobs, so unit feedback does not wait on containers: **Build & Unit Tests** (format,
+build, 632 hermetic tests) and **Integration Tests**, which uses the runner's Docker daemon for
+Testcontainers' throwaway SQL Server. RabbitMQ is never needed — the bus is MassTransit's in-memory
+harness.
+
+---
+
+## Deployment (Docker / Coolify)
+
+`docker-compose.yml` is the deployable stack: both application processes plus SQL Server and RabbitMQ.
+`docker-compose.dev.yml` remains the *development* file and starts infrastructure only.
+
+```bash
+docker compose up -d --build     # exactly what Coolify runs on a deploy
+docker compose ps                # all four services should reach (healthy)
+```
+
+| Service | Host port | Notes |
+| --- | --- | --- |
+| `chat-web` | **3100** | the chat; `CHAT_WEB_PORT` overrides |
+| `chat-bot` | **3101** | health only — `GET :3101/health` names the configured quote provider |
+| `sqlserver` | 3102, **loopback only** | off 1433 so it cannot clash with another SQL Server on the same host |
+| `rabbitmq` | 3103, **loopback only** | management UI. AMQP (5672) is not published at all |
+
+The database and the broker bind to `127.0.0.1`, so neither is on the public internet — reach them
+through an SSH tunnel. Nothing in the application uses those mappings: `chat-web` and `chat-bot` resolve
+`sqlserver` and `rabbitmq` over the compose network.
+
+**Environment variables** (Coolify → Settings → Environment Variables):
+
+| Variable | Required | Purpose |
+| --- | --- | --- |
+| `MSSQL_SA_PASSWORD` | **yes** | Baked into the volume on first start; changing it later needs the volume removed |
+| `RABBITMQ_USER` / `RABBITMQ_PASSWORD` | **yes** | The broker login both hosts share |
+| `FINNHUB_API_KEY` | no | Without it the bot answers a friendly failure and `/health` reports the gap |
+| `STOCKS_PROVIDER` | no | `Finnhub` (default) or `Stooq` |
+| `REQUIRE_SECURE_COOKIE` | no | Defaults to `true` — see below |
+
+The three required ones are declared `${VAR:?...}`, so a missing value fails the deploy naming the
+variable instead of starting a container that cannot connect.
+
+**Serve it over HTTPS, or turn one switch off deliberately.** The Identity cookie is `Secure` outside
+Development, and a browser will not return a `Secure` cookie over plain `http`. The symptom is not an
+error — registration appears to work and then every page bounces back to the login screen. Reached
+through a Coolify domain with TLS it needs no change: `ASPNETCORE_FORWARDEDHEADERS_ENABLED=true` is
+already set, so the app sees the proxy's `X-Forwarded-Proto`. If you deliberately browse
+`http://<host>:3100`, set `REQUIRE_SECURE_COOKIE=false` and accept that the session cookie then travels
+in the clear. Both paths were verified against the running stack.
+
+**Two things worth knowing:**
+
+- **Container healthchecks probe `/health/live`, not `/health/ready`.** Liveness runs no dependency
+  probe, so a database or broker blip cannot get a healthy process restarted underneath its own retry
+  logic — which is the distinction those two endpoints exist to make.
+- **On Windows, ports 3100–3103 may be unusable locally.** Hyper-V reserves dynamic ranges (measured:
+  3058–3357 on the development machine), and Docker then fails with "an attempt was made to access a
+  socket in a way forbidden by its access permissions". It is a Windows quirk, not a compose problem —
+  the Linux host is unaffected. Override `CHAT_WEB_PORT` and friends to test locally.
+
+Images build from `src/Chat.Web/Dockerfile` and `src/Chat.Bot/Dockerfile`, both with the repository root
+as context because central package management lives there. They are Debian-based rather than Alpine on
+purpose: the Alpine images ship without ICU, and `Microsoft.Data.SqlClient` throws "Globalization
+Invariant Mode is not supported" the moment it opens a connection. `chat-web` also mounts a volume for
+its data-protection keys, so a redeploy does not sign every user out.
+
 ---
 
 ## Architecture
