@@ -27,6 +27,24 @@
 #   SQLSERVER_HOST_PORT              3102   loopback only
 #   RABBITMQ_MANAGEMENT_HOST_PORT    3103   loopback only
 #
+# ── Reverse proxy (Coolify) ─────────────────────────────────────────────────────────────────────
+#
+# The applications listen on 3100 and 3101 *inside* the container, not on the .NET default of 8080.
+# That is not cosmetic. Coolify's "Domains" field reads the port after the colon as the **container**
+# port to forward to, so `https://chat.example.com:3100` only works if the app really is on 3100 —
+# otherwise Traefik forwards to a closed port and the browser gets 502 Bad Gateway with every
+# container reporting healthy, because they are. Keeping host and container port identical means one
+# number per service and no way to mismatch them.
+#
+# Give a domain only to chat-web (and to chat-bot if you want its /health public). sqlserver and
+# rabbitmq must have none: TDS is not HTTP, so a router in front of 1433 cannot work, and a public
+# broker console is not something to publish by accident.
+#
+# TLS must reach the app as TLS. Cloudflare in "Flexible" mode talks plain HTTP to the origin, which
+# makes ASP.NET Core see scheme http and withhold the Secure Identity cookie — the silent login loop
+# described below. Use Full (strict). Leave WebSockets enabled too, or SignalR falls back to long
+# polling.
+#
 # The two infrastructure ones are named differently from docker-compose.dev.yml's MSSQL_PORT and
 # RABBITMQ_MANAGEMENT_PORT deliberately: a developer's .env sets those to 1433 and 15672, and sharing
 # the names would make this file silently try to bind the ports the dev stack is already using.
@@ -49,7 +67,7 @@ services:
     restart: unless-stopped
     ports:
       # Published so Coolify's proxy (or a domain pointed at this port) can reach it.
-      - "${CHAT_WEB_PORT:-3100}:8080"
+      - "${CHAT_WEB_PORT:-3100}:3100"
     environment:
       ASPNETCORE_ENVIRONMENT: Production
 
@@ -83,7 +101,7 @@ services:
     healthcheck:
       # /health/live deliberately, not /health/ready: liveness runs no dependency probe, so a database
       # or broker blip cannot get a perfectly healthy process restarted underneath its own retry logic.
-      test: ["CMD", "curl", "-fsS", "http://localhost:8080/health/live"]
+      test: ["CMD", "curl", "-fsS", "http://localhost:3100/health/live"]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -97,7 +115,7 @@ services:
     ports:
       # Health only. The bot exposes no chat surface — it is reachable from the browser purely so the
       # decoupling is inspectable: GET :3101/health names the quote provider it is configured for.
-      - "${CHAT_BOT_PORT:-3101}:8080"
+      - "${CHAT_BOT_PORT:-3101}:3101"
     environment:
       ASPNETCORE_ENVIRONMENT: Production
       RabbitMq__HostName: rabbitmq
@@ -109,7 +127,7 @@ services:
       rabbitmq:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:8080/health/live"]
+      test: ["CMD", "curl", "-fsS", "http://localhost:3101/health/live"]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -123,11 +141,15 @@ services:
       ACCEPT_EULA: "Y"
       MSSQL_PID: Developer
       MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD:?set MSSQL_SA_PASSWORD}
+    # NO DOMAIN FOR THIS SERVICE. Unlike the two applications, aligning its port would not help: the
+    # reverse proxy routes HTTP, and SQL Server speaks TDS — a binary protocol. An HTTPS router in front
+    # of it cannot work on 1433, on 3102, or on any other port. Remote access to a database is a raw TCP
+    # port and a firewall rule, or better, the SSH tunnel below.
     ports:
       # Two deliberate choices. The port is off 1433 because this VPS already runs another SQL Server,
       # and it binds to 127.0.0.1 so the database is not on the public internet — reach it through an
       # SSH tunnel when you need SSMS. chat-web does not use this mapping at all; it goes over the
-      # compose network.
+      # compose network, where the port is still 1433.
       - "127.0.0.1:${SQLSERVER_HOST_PORT:-3102}:1433"
     volumes:
       - sqlserver-data:/var/opt/mssql
@@ -150,6 +172,10 @@ services:
       RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:?set RABBITMQ_USER}
       RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:?set RABBITMQ_PASSWORD}
       RABBITMQ_DEFAULT_VHOST: ${RABBITMQ_VHOST:-/}
+    # NO DOMAIN FOR THIS SERVICE EITHER. The management UI *is* HTTP, so unlike SQL Server a router
+    # could reach it — but only at container port 15672, and that port is awkward to move (measured:
+    # RABBITMQ_MANAGEMENT_TCP_PORT is not a real variable; it needs a mounted rabbitmq.conf). Publishing
+    # a broker console with administrator credentials to the internet is not worth either effort.
     ports:
       # AMQP (5672) is deliberately not published: only the two application containers speak it, and
       # they do that over the compose network. The management UI is published on loopback only, so it

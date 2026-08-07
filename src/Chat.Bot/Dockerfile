@@ -34,6 +34,9 @@ WORKDIR /app
 COPY --from=build /app ./
 
 USER $APP_UID
-EXPOSE 8080
+
+# 3101, matching the published port, for the same reason as Chat.Web's 3100 — see that Dockerfile.
+ENV ASPNETCORE_HTTP_PORTS=3101
+EXPOSE 3101
 
 ENTRYPOINT ["dotnet", "Chat.Bot.dll"]

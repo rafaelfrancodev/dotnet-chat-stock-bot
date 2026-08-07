@@ -46,6 +46,12 @@ ENV HOME=/home/app
 RUN mkdir -p /home/app/.aspnet/DataProtection-Keys && chown -R $APP_UID /home/app
 
 USER $APP_UID
-EXPOSE 8080
+
+# 3100 rather than the image default of 8080, so one number describes this service everywhere: the port
+# the app listens on, the port compose publishes, and the port a reverse proxy has to be told about.
+# Coolify's "Domains" field takes the *container* port after the colon — with the app on 8080 and the
+# domain written as :3100, Traefik forwards to a port nothing is listening on and answers 502.
+ENV ASPNETCORE_HTTP_PORTS=3100
+EXPOSE 3100
 
 ENTRYPOINT ["dotnet", "Chat.Web.dll"]

@@ -368,12 +368,15 @@ docker compose up -d --build     # exactly what Coolify runs on a deploy
 docker compose ps                # all four services should reach (healthy)
 ```
 
-| Service | Host port | Notes |
-| --- | --- | --- |
-| `chat-web` | **3100** | the chat; `CHAT_WEB_PORT` overrides |
-| `chat-bot` | **3101** | health only — `GET :3101/health` names the configured quote provider |
-| `sqlserver` | 3102, **loopback only** | off 1433 so it cannot clash with another SQL Server on the same host |
-| `rabbitmq` | 3103, **loopback only** | management UI. AMQP (5672) is not published at all |
+| Service | Host port | Container port | Notes |
+| --- | --- | --- | --- |
+| `chat-web` | **3100** | **3100** | the chat; `CHAT_WEB_PORT` overrides the host side |
+| `chat-bot` | **3101** | **3101** | health only — `GET :3101/health` names the configured quote provider |
+| `sqlserver` | 3102, **loopback only** | 1433 | off 1433 on the host so it cannot clash with another SQL Server there |
+| `rabbitmq` | 3103, **loopback only** | 15672 | management UI. AMQP (5672) is not published at all |
+
+The applications listen on **3100 and 3101 inside the container**, not on the .NET default of 8080, and
+that is deliberate — see "Reverse proxy" below.
 
 The database and the broker bind to `127.0.0.1`, so neither is on the public internet — reach them
 through an SSH tunnel. Nothing in the application uses those mappings: `chat-web` and `chat-bot` resolve
@@ -400,7 +403,30 @@ already set, so the app sees the proxy's `X-Forwarded-Proto`. If you deliberatel
 `http://<host>:3100`, set `REQUIRE_SECURE_COOKIE=false` and accept that the session cookie then travels
 in the clear. Both paths were verified against the running stack.
 
-**Two things worth knowing:**
+### Reverse proxy (Coolify) — the one field that causes a 502
+
+In Coolify's **Domains** field, the port after the colon is the **container** port the proxy forwards to,
+not a public port. So `https://chat.example.com:3100` only works if the application really is listening on
+3100 inside its container. Getting this wrong produces the most confusing failure in the whole setup:
+every container reports `healthy` and the deployment succeeds, because the apps *are* fine — the proxy is
+simply forwarding to a closed port, and the browser gets **502 Bad Gateway**.
+
+That is why both applications listen on 3100/3101 rather than 8080: host port, container port and the port
+written in the domain are one number per service, so there is nothing to mismatch.
+
+| Service | Domain in Coolify |
+| --- | --- |
+| `chat-web` | `https://<your-domain>:3100` — the only one that needs a domain |
+| `chat-bot` | `https://<your-domain>:3101`, and only if you want its `/health` public |
+| `sqlserver` | **none.** Aligning its port would not help: the proxy routes HTTP and SQL Server speaks TDS, a binary protocol. An HTTPS router in front of it cannot work on any port |
+| `rabbitmq` | **none.** The management UI is HTTP, so a router *could* reach it at `:15672` — but that publishes a broker console with administrator credentials |
+
+**Behind Cloudflare, use SSL mode Full (strict).** In *Flexible* mode Cloudflare talks plain HTTP to the
+origin, so ASP.NET Core sees scheme `http` and withholds the `Secure` Identity cookie — the silent login
+loop described above, reached by a different route. Leave **WebSockets** enabled as well, or SignalR falls
+back to long polling.
+
+**Two more things worth knowing:**
 
 - **Container healthchecks probe `/health/live`, not `/health/ready`.** Liveness runs no dependency
   probe, so a database or broker blip cannot get a healthy process restarted underneath its own retry
