@@ -119,6 +119,24 @@
         messages.scrollTop = messages.scrollHeight;
     }
 
+    /**
+     * The label for a post's timestamp, in the reader's own locale and time zone.
+     *
+     * Time alone for today, date and time for anything older. The challenge requires the history to be
+     * "ordered by their timestamps", and a clock-only label undercuts exactly that: the last 50 messages can
+     * span several days, so `23:58` above `00:03` reads as out of order, and `14:20` does not say which day.
+     * Seconds are kept because two posts in the same minute would otherwise carry an identical label, which
+     * makes the ordering impossible to check at a glance.
+     */
+    function timestampLabel(posted) {
+        const now = new Date();
+        const isToday = posted.getFullYear() === now.getFullYear()
+            && posted.getMonth() === now.getMonth()
+            && posted.getDate() === now.getDate();
+
+        return isToday ? posted.toLocaleTimeString() : posted.toLocaleString();
+    }
+
     function render(message) {
         if (!message || rendered.has(message.id)) {
             return;
@@ -126,10 +144,15 @@
 
         rendered.add(message.id);
 
+        const posted = new Date(message.postedAtUtc);
+
         const time = document.createElement("time");
+
+        // The machine-readable value stays the server's UTC instant, whatever the label says.
         time.dateTime = message.postedAtUtc;
         time.className = "text-muted me-2";
-        time.textContent = new Date(message.postedAtUtc).toLocaleTimeString();
+        time.textContent = timestampLabel(posted);
+        time.title = posted.toLocaleString();
 
         const author = document.createElement("strong");
         author.textContent = message.authorDisplayName;
