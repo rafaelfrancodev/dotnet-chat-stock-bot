@@ -175,21 +175,32 @@ public static class DependencyInjection
         return services;
     }
 
-    /// <summary>Typed Stooq HTTP client and CSV parsing. Used by Chat.Bot only.</summary>
+    /// <summary>
+    /// The typed quote-provider HTTP client selected by <c>Stocks:Provider</c>, and its parsing. Used by
+    /// Chat.Bot only.
+    /// </summary>
     /// <param name="services">Service collection to register into.</param>
-    /// <param name="configuration">Configuration carrying the <c>Stooq</c> section.</param>
+    /// <param name="configuration">
+    /// Configuration carrying <c>Stocks:Provider</c> and the selected provider's own section.
+    /// </param>
     /// <remarks>
     /// The client is typed and named, so <c>IHttpClientFactory</c> owns one pooled handler for the whole
     /// process — a new <see cref="HttpClient"/> per quote would exhaust sockets under the flood of
     /// <c>/stock=</c> commands the challenge warns about.
     /// <para>
-    /// <c>StooqOptions.TimeoutSeconds</c> is applied as the resilience pipeline's <c>TotalRequestTimeout</c>
-    /// rather than as <see cref="HttpClient.Timeout"/>. Measured: <c>AddStandardResilienceHandler</c>
-    /// appends its own client action setting <see cref="HttpClient.Timeout"/> to
-    /// <see cref="Timeout.InfiniteTimeSpan"/>, so the pipeline owns the budget by design — setting the
-    /// client timeout as well would only add a race able to abort a retry mid-flight. The per-attempt
-    /// timeout is that budget divided by <see cref="Stocks.StooqClient.MaxAttemptsPerLookup"/>, so a
-    /// hanging Stooq leaves room for the retries instead of spending the whole budget on its first try.
+    /// The selected provider's <c>TimeoutSeconds</c> is applied as the resilience pipeline's
+    /// <c>TotalRequestTimeout</c> rather than as <see cref="HttpClient.Timeout"/>. Measured:
+    /// <c>AddStandardResilienceHandler</c> appends its own client action setting
+    /// <see cref="HttpClient.Timeout"/> to <see cref="Timeout.InfiniteTimeSpan"/>, so the pipeline owns the
+    /// budget by design — setting the client timeout as well would only add a race able to abort a retry
+    /// mid-flight. The per-attempt timeout is that budget divided by
+    /// <see cref="Stocks.StockQuoteHttpDefaults.MaxAttemptsPerLookup"/>, so a hanging service leaves room
+    /// for the retries instead of spending the whole budget on its first try.
+    /// </para>
+    /// <para>
+    /// Both providers get the identical pipeline from <see cref="ConfigureQuoteResilience"/>: only the
+    /// budget differs, and it comes from whichever options object was selected. Registration and probe read
+    /// the selection through <see cref="StockQuoteProviderSelection"/>, so they cannot diverge.
     /// </para>
     /// </remarks>
     public static IServiceCollection AddStockQuotes(this IServiceCollection services, IConfiguration configuration)
@@ -197,75 +208,68 @@ public static class DependencyInjection
         ArgumentNullException.ThrowIfNull(services);
         ArgumentNullException.ThrowIfNull(configuration);
 
+        // Validated on start, not on first use: a malformed BaseAddress or an out-of-range timeout would
+        // otherwise surface inside Consume, where it costs four delivery attempts and a dead-lettered
+        // request before anyone learns a setting was mistyped. Both sections are bound regardless of the
+        // selection, so a typo in the section that is not in use still fails loudly.
         services
             .AddOptions<StooqOptions>()
-            .Bind(configuration.GetSection(StooqOptions.SectionName));
+            .Bind(configuration.GetSection(StooqOptions.SectionName))
+            .ValidateDataAnnotations()
+            .ValidateOnStart();
 
         services
             .AddOptions<FinnhubOptions>()
-            .Bind(configuration.GetSection(FinnhubOptions.SectionName));
+            .Bind(configuration.GetSection(FinnhubOptions.SectionName))
+            .ValidateDataAnnotations()
+            .ValidateOnStart();
 
         // Resolved once, centrally, so the bot's health check probes the provider the bot actually calls.
         if (StockQuoteProviderSelection.Resolve(configuration) is StockQuoteProviderKind.Finnhub)
         {
             services
-                .AddHttpClient<IStockQuoteProvider, FinnhubClient>(FinnhubClient.HttpClientName, ConfigureFinnhubClient)
+                .AddHttpClient<IStockQuoteProvider, FinnhubClient>(FinnhubClient.HttpClientName, ConfigureQuoteClient)
                 .AddStandardResilienceHandler()
-                .Configure(ConfigureFinnhubResilience);
+                .Configure((resilience, provider) => ConfigureQuoteResilience(
+                    resilience,
+                    provider.GetRequiredService<IOptions<FinnhubOptions>>().Value.TimeoutSeconds));
 
             return services;
         }
 
         services
-            .AddHttpClient<IStockQuoteProvider, StooqClient>(StooqClient.HttpClientName, ConfigureStooqClient)
+            .AddHttpClient<IStockQuoteProvider, StooqClient>(StooqClient.HttpClientName, ConfigureQuoteClient)
             .AddStandardResilienceHandler()
-            .Configure(ConfigureStooqResilience);
+            .Configure((resilience, provider) => ConfigureQuoteResilience(
+                resilience,
+                provider.GetRequiredService<IOptions<StooqOptions>>().Value.TimeoutSeconds));
 
         return services;
     }
 
     /// <summary>
-    /// Bounds the buffered response. The base address is deliberately not set here: the client builds an
-    /// absolute URL from <see cref="StooqOptions"/> itself, so there is one source for the endpoint.
+    /// Bounds the buffered response. The base address is deliberately not set here: each client builds an
+    /// absolute URL from its own options, so there is one source for the endpoint.
     /// </summary>
-    private static void ConfigureStooqClient(HttpClient client) =>
-        client.MaxResponseContentBufferSize = StooqClient.MaxResponseBytes;
+    private static void ConfigureQuoteClient(HttpClient client) =>
+        client.MaxResponseContentBufferSize = StockQuoteHttpDefaults.MaxResponseBytes;
 
-    private static void ConfigureFinnhubClient(HttpClient client) =>
-        client.MaxResponseContentBufferSize = FinnhubClient.MaxResponseBytes;
-
-    /// <summary>Same shape as the Stooq pipeline, driven by <see cref="FinnhubOptions.TimeoutSeconds"/>.</summary>
-    private static void ConfigureFinnhubResilience(HttpStandardResilienceOptions resilience, IServiceProvider provider)
+    /// <summary>
+    /// The one resilience pipeline both quote providers get. Only <paramref name="timeoutSeconds"/> differs
+    /// between them, which is why this takes the budget rather than an options object — a provider-specific
+    /// copy of this method is how one provider's pipeline ends up keyed off another's constants.
+    /// </summary>
+    /// <param name="resilience">The standard handler's options for the client being registered.</param>
+    /// <param name="timeoutSeconds">Total budget for one lookup, from the selected provider's options.</param>
+    private static void ConfigureQuoteResilience(HttpStandardResilienceOptions resilience, int timeoutSeconds)
     {
-        FinnhubOptions options = provider.GetRequiredService<IOptions<FinnhubOptions>>().Value;
-
-        TimeSpan budget = TimeSpan.FromSeconds(options.TimeoutSeconds);
-        TimeSpan perAttempt = budget / StooqClient.MaxAttemptsPerLookup;
+        TimeSpan budget = TimeSpan.FromSeconds(timeoutSeconds);
+        TimeSpan perAttempt = budget / StockQuoteHttpDefaults.MaxAttemptsPerLookup;
 
         resilience.TotalRequestTimeout.Timeout = budget;
         resilience.AttemptTimeout.Timeout = perAttempt;
-        resilience.Retry.MaxRetryAttempts = StooqClient.MaxAttemptsPerLookup - 1;
-        resilience.Retry.Delay = TimeSpan.FromMilliseconds(StooqClient.RetryDelayMilliseconds);
-
-        TimeSpan minimumSamplingDuration = perAttempt * 2;
-
-        if (resilience.CircuitBreaker.SamplingDuration < minimumSamplingDuration)
-        {
-            resilience.CircuitBreaker.SamplingDuration = minimumSamplingDuration;
-        }
-    }
-
-    private static void ConfigureStooqResilience(HttpStandardResilienceOptions resilience, IServiceProvider provider)
-    {
-        StooqOptions options = provider.GetRequiredService<IOptions<StooqOptions>>().Value;
-
-        TimeSpan budget = TimeSpan.FromSeconds(options.TimeoutSeconds);
-        TimeSpan perAttempt = budget / StooqClient.MaxAttemptsPerLookup;
-
-        resilience.TotalRequestTimeout.Timeout = budget;
-        resilience.AttemptTimeout.Timeout = perAttempt;
-        resilience.Retry.MaxRetryAttempts = StooqClient.MaxAttemptsPerLookup - 1;
-        resilience.Retry.Delay = TimeSpan.FromMilliseconds(StooqClient.RetryDelayMilliseconds);
+        resilience.Retry.MaxRetryAttempts = StockQuoteHttpDefaults.MaxAttemptsPerLookup - 1;
+        resilience.Retry.Delay = TimeSpan.FromMilliseconds(StockQuoteHttpDefaults.RetryDelayMilliseconds);
 
         // The standard handler validates that the breaker samples at least two attempts; a generous
         // configured timeout would otherwise fail validation at startup rather than at the first call.

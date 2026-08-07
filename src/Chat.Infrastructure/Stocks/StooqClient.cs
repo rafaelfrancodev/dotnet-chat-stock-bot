@@ -28,21 +28,6 @@ internal sealed class StooqClient(
     /// <summary>Name of the typed client, so the registration and its tests cannot drift.</summary>
     internal const string HttpClientName = nameof(StooqClient);
 
-    /// <summary>
-    /// Attempts spent on one lookup, initial call included. Also divides the request budget into the
-    /// per-attempt timeout, so a slow Stooq cannot consume the whole budget on its first try.
-    /// </summary>
-    internal const int MaxAttemptsPerLookup = 3;
-
-    /// <summary>Base backoff between attempts; the standard handler grows it exponentially with jitter.</summary>
-    internal const int RetryDelayMilliseconds = 250;
-
-    /// <summary>
-    /// Ceiling on the buffered response. A quote row is ~70 bytes; this only stops a redirected or
-    /// hostile endpoint from streaming an unbounded body into the bot's memory.
-    /// </summary>
-    internal const int MaxResponseBytes = 64 * 1024;
-
     private readonly StooqOptions _options = options.Value;
 
     /// <inheritdoc/>

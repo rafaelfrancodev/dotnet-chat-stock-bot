@@ -22,7 +22,7 @@ public sealed class AddStockQuotesTests
     /// How <c>AddStandardResilienceHandler</c> names its own options: the client name plus
     /// <c>-standard</c>. Measured, because the suffix is not part of the package's documented surface.
     /// </summary>
-    private const string ResilienceOptionsName = $"{StooqClient.HttpClientName}-standard";
+    private const string ResilienceOptionsSuffix = "-standard";
 
     [Fact]
     public async Task AddStockQuotes_ResolvesTheQuoteProviderPort()
@@ -117,43 +117,59 @@ public sealed class AddStockQuotesTests
     /// facts stay recorded together rather than looking like an oversight.
     /// </para>
     /// </summary>
-    [Fact]
-    public async Task AddStockQuotes_ConfiguresTheTypedClientFromOptions()
+    [Theory]
+    [InlineData(DependencyInjection.FinnhubProvider, FinnhubOptions.SectionName, nameof(FinnhubClient))]
+    [InlineData(DependencyInjection.StooqProvider, StooqOptions.SectionName, nameof(StooqClient))]
+    public async Task AddStockQuotes_ConfiguresTheTypedClientFromOptions(
+        string provider,
+        string section,
+        string clientName)
     {
-        await using ServiceProvider provider = Configured();
+        await using ServiceProvider services = ConfiguredForProvider(provider, section);
 
-        using HttpClient client = provider.GetRequiredService<IHttpClientFactory>()
-            .CreateClient(StooqClient.HttpClientName);
+        using HttpClient client = services.GetRequiredService<IHttpClientFactory>().CreateClient(clientName);
 
-        client.MaxResponseContentBufferSize.Should().Be(StooqClient.MaxResponseBytes);
+        client.MaxResponseContentBufferSize.Should().Be(StockQuoteHttpDefaults.MaxResponseBytes);
         client.Timeout.Should().Be(Timeout.InfiniteTimeSpan);
     }
 
     /// <summary>
     /// The configured timeout is the pipeline's total budget, split into
-    /// <see cref="StooqClient.MaxAttemptsPerLookup"/> attempts, so one slow attempt cannot spend the
-    /// budget the retries need.
+    /// <see cref="StockQuoteHttpDefaults.MaxAttemptsPerLookup"/> attempts, so one slow attempt cannot spend
+    /// the budget the retries need.
+    /// <para>
+    /// Asserted for <b>both</b> providers: the pipeline is one shared method, and this is what stops the
+    /// default provider's budget from being keyed off the fallback provider's constants again.
+    /// </para>
     /// </summary>
-    [Fact]
-    public async Task AddStockQuotes_AppliesTheConfiguredTimeoutAsTheResilienceBudget()
+    [Theory]
+    [InlineData(DependencyInjection.FinnhubProvider, FinnhubOptions.SectionName, nameof(FinnhubClient))]
+    [InlineData(DependencyInjection.StooqProvider, StooqOptions.SectionName, nameof(StooqClient))]
+    public async Task AddStockQuotes_AppliesTheConfiguredTimeoutAsTheResilienceBudget(
+        string provider,
+        string section,
+        string clientName)
     {
-        await using ServiceProvider provider = Configured();
+        await using ServiceProvider services = ConfiguredForProvider(provider, section);
 
-        HttpStandardResilienceOptions resilience = provider
+        HttpStandardResilienceOptions resilience = services
             .GetRequiredService<IOptionsMonitor<HttpStandardResilienceOptions>>()
-            .Get(ResilienceOptionsName);
+            .Get(clientName + ResilienceOptionsSuffix);
 
         resilience.TotalRequestTimeout.Timeout.Should().Be(TimeSpan.FromSeconds(7));
-        resilience.AttemptTimeout.Timeout.Should().Be(TimeSpan.FromSeconds(7) / StooqClient.MaxAttemptsPerLookup);
-        resilience.Retry.MaxRetryAttempts.Should().Be(StooqClient.MaxAttemptsPerLookup - 1);
+        resilience.AttemptTimeout.Timeout.Should()
+            .Be(TimeSpan.FromSeconds(7) / StockQuoteHttpDefaults.MaxAttemptsPerLookup);
+        resilience.Retry.MaxRetryAttempts.Should().Be(StockQuoteHttpDefaults.MaxAttemptsPerLookup - 1);
+        resilience.Retry.Delay.Should()
+            .Be(TimeSpan.FromMilliseconds(StockQuoteHttpDefaults.RetryDelayMilliseconds));
         resilience.CircuitBreaker.SamplingDuration.Should()
             .BeGreaterThanOrEqualTo(resilience.AttemptTimeout.Timeout * 2, "the standard handler validates it");
     }
 
     /// <summary>
     /// Proves the standard resilience handler is actually in the chain: a 500 is retried up to
-    /// <see cref="StooqClient.MaxAttemptsPerLookup"/> attempts and the caller still gets an answer rather
-    /// than an exception.
+    /// <see cref="StockQuoteHttpDefaults.MaxAttemptsPerLookup"/> attempts and the caller still gets an
+    /// answer rather than an exception.
     /// </summary>
     [Fact]
     public async Task AddStockQuotes_TransientFailure_IsRetriedWithinOneLookup()
@@ -169,7 +185,7 @@ public sealed class AddStockQuotesTests
         StockQuoteLookup lookup = await provider.GetRequiredService<IStockQuoteProvider>()
             .GetQuoteAsync(Code("aapl.us"), CancellationToken.None);
 
-        attempts.Should().Be(StooqClient.MaxAttemptsPerLookup);
+        attempts.Should().Be(StockQuoteHttpDefaults.MaxAttemptsPerLookup);
         lookup.Outcome.Should().Be(StockQuoteOutcome.LookupFailed);
     }
 
@@ -216,6 +232,111 @@ public sealed class AddStockQuotesTests
 
         services.Invoking(collection => collection.AddStockQuotes(null!))
             .Should().Throw<ArgumentNullException>();
+    }
+
+    /// <summary>
+    /// A mistyped endpoint fails where an operator sees it — at start — instead of inside <c>Consume</c>,
+    /// where the cost is four delivery attempts, a dead-lettered request and a participant left with
+    /// silence over a typo.
+    /// <para>
+    /// Measured, and the reason data annotations alone are not enough: the framework's
+    /// <c>UriTypeConverter</c> binds <c>not a uri</c> to a perfectly valid <b>relative</b>
+    /// <see cref="Uri"/>, so <c>[Required]</c> is satisfied and only <c>new Uri(baseAddress, path)</c>
+    /// later objects.
+    /// </para>
+    /// </summary>
+    [Theory]
+    [InlineData(FinnhubOptions.SectionName)]
+    [InlineData(StooqOptions.SectionName)]
+    public async Task AddStockQuotes_RelativeBaseAddress_FailsAtStartupRatherThanAtTheFirstLookup(string section)
+    {
+        await using ServiceProvider services = WithSetting($"{section}:BaseAddress", "not a uri");
+
+        services.GetRequiredService<IStartupValidator>()
+            .Invoking(validator => validator.Validate())
+            .Should().Throw<OptionsValidationException>()
+            .WithMessage($"*{section}:{nameof(FinnhubOptions.BaseAddress)}*")
+            .WithMessage("*absolute*");
+    }
+
+    /// <summary>
+    /// A quote path with no <c>{0}</c> would ask the service for no symbol at all, on every lookup, and
+    /// read in chat as a broken bot rather than a mistyped setting.
+    /// </summary>
+    [Theory]
+    [InlineData(FinnhubOptions.SectionName)]
+    [InlineData(StooqOptions.SectionName)]
+    public async Task AddStockQuotes_QuotePathWithoutTheSymbolPlaceholder_FailsAtStartup(string section)
+    {
+        await using ServiceProvider services = WithSetting($"{section}:QuotePath", "q/l/?s=aapl.us");
+
+        services.GetRequiredService<IStartupValidator>()
+            .Invoking(validator => validator.Validate())
+            .Should().Throw<OptionsValidationException>()
+            .WithMessage($"*{section}:{nameof(FinnhubOptions.QuotePath)}*");
+    }
+
+    /// <summary>
+    /// A budget of zero would abort every lookup before it left the process — indistinguishable, from the
+    /// chat's side, from the quote service being down.
+    /// </summary>
+    [Theory]
+    [InlineData(FinnhubOptions.SectionName, "0")]
+    [InlineData(FinnhubOptions.SectionName, "-1")]
+    [InlineData(StooqOptions.SectionName, "0")]
+    [InlineData(StooqOptions.SectionName, "121")]
+    public async Task AddStockQuotes_TimeoutOutOfRange_FailsAtStartup(string section, string timeoutSeconds)
+    {
+        await using ServiceProvider services = WithSetting($"{section}:TimeoutSeconds", timeoutSeconds);
+
+        services.GetRequiredService<IStartupValidator>()
+            .Invoking(validator => validator.Validate())
+            .Should().Throw<OptionsValidationException>()
+            .WithMessage($"*{nameof(FinnhubOptions.TimeoutSeconds)}*");
+    }
+
+    /// <summary>
+    /// Running keyless is a supported degraded mode — a friendly failure in chat and a <c>Degraded</c>
+    /// health report — so it must not stop the host the way a mistyped endpoint does.
+    /// </summary>
+    [Fact]
+    public async Task AddStockQuotes_WithoutAnApiKey_StillStarts()
+    {
+        await using ServiceProvider services = ForProvider(DependencyInjection.FinnhubProvider);
+
+        services.GetRequiredService<IStartupValidator>()
+            .Invoking(validator => validator.Validate())
+            .Should().NotThrow();
+    }
+
+    /// <summary>Registers the quote providers with one setting overridden, everything else defaulted.</summary>
+    private static ServiceProvider WithSetting(string key, string value)
+    {
+        ServiceCollection services = [];
+        services.AddStockQuotes(new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?> { [key] = value })
+            .Build());
+
+        return services.BuildServiceProvider(validateScopes: true);
+    }
+
+    /// <summary>
+    /// Registers one provider with a 7-second budget in its own section, so the resilience assertions can
+    /// run against either provider from the same body.
+    /// </summary>
+    private static ServiceProvider ConfiguredForProvider(string provider, string section)
+    {
+        ServiceCollection services = [];
+        services.AddStockQuotes(new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                [DependencyInjection.StockQuoteProviderKey] = provider,
+                [$"{section}:BaseAddress"] = "https://quotes.invalid/",
+                [$"{section}:TimeoutSeconds"] = "7",
+            })
+            .Build());
+
+        return services.BuildServiceProvider(validateScopes: true);
     }
 
     /// <summary>

@@ -29,9 +29,6 @@ internal sealed class FinnhubClient(
     /// <summary>Name of the typed client, so the registration and its tests cannot drift.</summary>
     internal const string HttpClientName = nameof(FinnhubClient);
 
-    /// <summary>Ceiling on the buffered response. A quote object is a couple of hundred bytes.</summary>
-    internal const int MaxResponseBytes = 64 * 1024;
-
     private readonly FinnhubOptions _options = options.Value;
 
     /// <inheritdoc/>

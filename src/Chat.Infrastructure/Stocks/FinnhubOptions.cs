@@ -1,3 +1,5 @@
+using System.ComponentModel.DataAnnotations;
+
 namespace Chat.Infrastructure.Stocks;
 
 /// <summary>
@@ -6,19 +8,30 @@ namespace Chat.Infrastructure.Stocks;
 /// <remarks>
 /// Finnhub is an API built for programmatic access, which is why it is the alternative to Stooq rather
 /// than something that works around Stooq's browser check: it answers an <c>HttpClient</c> by design.
+/// <para>
+/// Validated on start. <see cref="ApiKey"/> is deliberately <b>not</b> required: running without a key is a
+/// supported degraded mode — the bot answers a friendly failure and the health check reports the gap — so
+/// a missing key must not stop the host.
+/// </para>
 /// </remarks>
-public sealed class FinnhubOptions
+public sealed class FinnhubOptions : IValidatableObject
 {
     /// <summary>Configuration section these options are bound from.</summary>
     public const string SectionName = "Finnhub";
 
     /// <summary>Root address of the quote service.</summary>
+    [Required]
     public Uri BaseAddress { get; init; } = new("https://finnhub.io/");
 
     /// <summary>Relative quote path; <c>{0}</c> is the symbol and <c>{1}</c> the API key.</summary>
+    [Required(AllowEmptyStrings = false)]
     public string QuotePath { get; init; } = "api/v1/quote?symbol={0}&token={1}";
 
-    /// <summary>Request timeout applied to the typed HTTP client.</summary>
+    /// <summary>
+    /// Total budget for one lookup, spent across every attempt. Bounded because zero would abort the call
+    /// before it left the process, and an unbounded value would hold a chat participant waiting.
+    /// </summary>
+    [Range(1, 120)]
     public int TimeoutSeconds { get; init; } = 10;
 
     /// <summary>
@@ -26,4 +39,8 @@ public sealed class FinnhubOptions
     /// a committed file — it is a credential like the database password.
     /// </summary>
     public string ApiKey { get; init; } = string.Empty;
+
+    /// <inheritdoc/>
+    public IEnumerable<ValidationResult> Validate(ValidationContext validationContext) =>
+        StockQuoteOptionsValidation.Validate(SectionName, BaseAddress, QuotePath);
 }

@@ -1,14 +1,18 @@
+using System.ComponentModel.DataAnnotations;
+
 namespace Chat.Infrastructure.Stocks;
 
 /// <summary>
-/// Settings for the Stooq quote provider. Bound from the <c>Stooq</c> configuration section.
+/// Settings for the Stooq quote provider. Bound from the <c>Stooq</c> configuration section, and validated
+/// on start so a mistyped endpoint fails at the host rather than inside a consumer.
 /// </summary>
-public sealed class StooqOptions
+public sealed class StooqOptions : IValidatableObject
 {
     /// <summary>Configuration section these options are bound from.</summary>
     public const string SectionName = "Stooq";
 
     /// <summary>Root address of the quote service.</summary>
+    [Required]
     public Uri BaseAddress { get; init; } = new("https://stooq.com/");
 
     /// <summary>
@@ -26,8 +30,17 @@ public sealed class StooqOptions
     /// README for the measurements and what that means for a reviewer.
     /// </para>
     /// </remarks>
+    [Required(AllowEmptyStrings = false)]
     public string QuotePath { get; init; } = "q/d/l/?s={0}&i=d";
 
-    /// <summary>Request timeout applied to the typed HTTP client.</summary>
+    /// <summary>
+    /// Total budget for one lookup, spent across every attempt. Bounded because zero would abort the call
+    /// before it left the process, and an unbounded value would hold a chat participant waiting.
+    /// </summary>
+    [Range(1, 120)]
     public int TimeoutSeconds { get; init; } = 10;
+
+    /// <inheritdoc/>
+    public IEnumerable<ValidationResult> Validate(ValidationContext validationContext) =>
+        StockQuoteOptionsValidation.Validate(SectionName, BaseAddress, QuotePath);
 }
