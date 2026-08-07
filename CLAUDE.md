@@ -84,11 +84,15 @@ dotnet run --project src/Chat.Web             # terminal 1 — http://localhost:
 dotnet run --project src/Chat.Bot             # terminal 2 — http://localhost:5299 (health only)
 ```
 
-**Deployment** — `docker-compose.yml` is the deployable stack (both apps + SQL Server + RabbitMQ), built from `src/Chat.Web/Dockerfile` and `src/Chat.Bot/Dockerfile` with the repo root as context. `docker-compose.dev.yml` stays the development file and starts infrastructure only. CI is `.github/workflows/pr-workflow.yml` (PRs and pushes to `main`); `deploy-to-dev.yml` verifies then calls a Coolify webhook.
+**Deployment** — `docker-compose.yml` is the deployable stack (both apps + SQL Server + RabbitMQ), built from `src/Chat.Web/Dockerfile` and `src/Chat.Bot/Dockerfile` with the repo root as context. `docker-compose.dev.yml` stays the development file and starts infrastructure only.
 
 ```bash
 docker compose up -d --build                  # web :3100, bot :3101, sqlserver :3102, rabbitmq UI :3103
 ```
+
+**Live on Coolify** (VPS behind Cloudflare): <https://chat-stock-app.joya.services> and <https://chat-stock-bot.joya.services/health>. Coolify config: Build Pack **Docker Compose**, Base Directory `/`, Compose Location `/docker-compose.yml`. A deploy is `docker compose up --build` on the VPS — `chat-web` migrates and seeds at startup, so nothing is run by hand. Env vars live in the Coolify UI (`MSSQL_SA_PASSWORD`, `RABBITMQ_USER`, `RABBITMQ_PASSWORD` required; `FINNHUB_API_KEY`, `STOCKS_PROVIDER`, `REQUIRE_SECURE_COOKIE` optional).
+
+**CI/CD** — `.github/workflows/pr-workflow.yml` runs on PRs *and* pushes to `main`: job 1 format + build + 632 unit tests, job 2 the 29 integration tests against a Testcontainers SQL Server. Verified green on the runner with **nothing skipped** — check the counts, because `[DockerFact]` turns a missing Docker daemon into a skip and still exits 0. `deploy-to-dev.yml` (pre-release or `workflow_dispatch`) runs every gate plus a `docker build` of both images, then curls the Coolify webhook; secrets `COOLIFY_WEBHOOK_DEVELOPMENT` / `COOLIFY_TOKEN_DEVELOPMENT` in the `development` environment.
 
 **Running both hosts together** (the stock flow needs both):
 

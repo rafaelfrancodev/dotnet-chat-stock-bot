@@ -11,6 +11,12 @@ endpoint the challenge names). Stooq's CSV endpoint became unreachable from a se
 which is why the second one exists and is now the default — see
 [Quote providers](#quote-providers--stooq-and-finnhub).
 
+**Running live:** [chat-stock-app.joya.services](https://chat-stock-app.joya.services) — register two users
+in two browser windows and try `/stock=aapl.us`. The bot's own health, including which quote provider it is
+configured for, is at [chat-stock-bot.joya.services/health](https://chat-stock-bot.joya.services/health).
+Everything below also runs locally; see [Deployment](#deployment-docker--coolify) for how that instance is
+put together.
+
 ## Mandatory requirements and where they are
 
 | Requirement | Where |
@@ -351,14 +357,38 @@ dotnet format --verify-no-changes  # formatting gate
 ### Continuous integration
 
 `.github/workflows/pr-workflow.yml` runs the same gates on every pull request and on every commit that
-lands on `main`. Two jobs, so unit feedback does not wait on containers: **Build & Unit Tests** (format,
-build, 632 hermetic tests) and **Integration Tests**, which uses the runner's Docker daemon for
-Testcontainers' throwaway SQL Server. RabbitMQ is never needed — the bus is MassTransit's in-memory
-harness.
+lands on `main`. Two jobs, so unit feedback does not wait on containers:
+
+| Job | Steps |
+| --- | --- |
+| **Build & Unit Tests** | restore → `dotnet format --verify-no-changes` → `dotnet build -c Release` → 632 hermetic tests |
+| **Integration Tests** | pulls the SQL Server image, then runs the 29 tests against a throwaway container via Testcontainers |
+
+The SDK comes from `global.json`, so CI and a developer's machine cannot drift, and NuGet is cached on
+`Directory.Packages.props` — under central package management that file *is* the version graph. RabbitMQ is
+never needed: the bus is MassTransit's in-memory harness.
+
+Verified green on the runner: **632 / 632** unit and **29 / 29** integration, with nothing skipped. That
+last part is worth checking on any CI that runs this suite — `[DockerFact]` turns an unavailable Docker
+daemon into a *skip* and leaves the exit code 0, so a green tick alone does not prove the container tests
+ran. Read the counts.
+
+Formatting is a separate step from the build on purpose: `dotnet build` reports 0 warnings while whitespace
+and layout violations are still present, measured on this repository more than once.
 
 ---
 
 ## Deployment (Docker / Coolify)
+
+**Live:** the stack is deployed on a VPS behind Coolify and Cloudflare.
+
+| | |
+| --- | --- |
+| Chat | https://chat-stock-app.joya.services |
+| Bot health | https://chat-stock-bot.joya.services/health |
+
+Both verified answering at the time of writing; the bot's `/health` reports `stock-quote-provider: Healthy —
+"Finnhub responded 200."`, so the deployment resolves real prices rather than the keyless fallback.
 
 `docker-compose.yml` is the deployable stack: both application processes plus SQL Server and RabbitMQ.
 `docker-compose.dev.yml` remains the *development* file and starts infrastructure only.
@@ -377,6 +407,23 @@ docker compose ps                # all four services should reach (healthy)
 
 The applications listen on **3100 and 3101 inside the container**, not on the .NET default of 8080, and
 that is deliberate — see "Reverse proxy" below.
+
+### How the Coolify application is configured
+
+Coolify builds the images itself from this repository — nothing is pushed to a registry.
+
+| Setting | Value |
+| --- | --- |
+| Build Pack | **Docker Compose** |
+| Base Directory | `/` |
+| Docker Compose Location | `/docker-compose.yml` |
+| Domains | only `chat-web` (and optionally `chat-bot`) — see the table below |
+
+A deploy is a `docker compose up --build` on the VPS: images are rebuilt, `chat-web` applies pending
+migrations at startup and seeds the `General` room, then both hosts connect to the broker. Nothing has to be
+run by hand — no `dotnet ef database update`, no queue declaration. The order is enforced by
+`depends_on: condition: service_healthy`, so neither application starts before SQL Server accepts logins and
+RabbitMQ reports running.
 
 The database and the broker bind to `127.0.0.1`, so neither is on the public internet — reach them
 through an SSH tunnel. Nothing in the application uses those mappings: `chat-web` and `chat-bot` resolve
@@ -441,6 +488,25 @@ as context because central package management lives there. They are Debian-based
 purpose: the Alpine images ship without ICU, and `Microsoft.Data.SqlClient` throws "Globalization
 Invariant Mode is not supported" the moment it opens a connection. `chat-web` also mounts a volume for
 its data-protection keys, so a redeploy does not sign every user out.
+
+### Triggering a deployment
+
+`.github/workflows/deploy-to-dev.yml` runs on a **pre-release** or on **workflow_dispatch**, and it will not
+deploy anything it has not first verified:
+
+1. restore, build, unit tests, integration tests — the full gate set;
+2. `docker build` of **both** images. This costs a few minutes and is the only step that catches a
+   Dockerfile which no longer restores, a failure the .NET build cannot see because it never enters a
+   container;
+3. only then a `curl` to the Coolify webhook, with `--fail-with-body` so a rejected call fails the job
+   instead of leaving a green tick over an HTTP 401.
+
+It needs two repository secrets in the `development` environment: `COOLIFY_WEBHOOK_DEVELOPMENT` and
+`COOLIFY_TOKEN_DEVELOPMENT`. Coolify pulls the repository and runs the compose file itself, so the workflow
+never ships an artefact — it verifies, then asks Coolify to start.
+
+Coolify's own **Deployments** tab can also redeploy on demand, which is the quickest way to pick up a commit
+without cutting a release.
 
 ---
 
